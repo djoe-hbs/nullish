@@ -1,0 +1,121 @@
+# Nullish — local stack (runs on this PC).
+# All models (chat/router, embeddings, reranker) run on a rented Vast.ai GPU, reached through one
+# SSH tunnel on the host (gpu/tunnel.ps1 -> localhost:8001/8002/8003), which containers see as
+# host.docker.internal. Crawling, extraction and chunking run here even while the GPU is off;
+# new chunks wait for embedding until it is back.
+
+name: nullish
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-nullish}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nullish}
+      POSTGRES_DB: ${POSTGRES_DB:-nullish}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:55432:5432"   # host port moved: 5432/5433 already used on this PC
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nullish}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:56379:6379"   # 6379 already used by another project
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # OPTIONAL local CPU models (`docker compose --profile cpu-models up`). Off by default:
+  # on this PC's CPU (Ryzen 5 3500U) Qwen3-Embedding-0.6B took ~31 s per 600-token chunk and
+  # ~10 min to warm up. Only useful on a much faster CPU.
+  tei-embed:
+    profiles: ["cpu-models"]
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.8
+    command: ["--model-id", "${EMBED_MODEL:-Qwen/Qwen3-Embedding-0.6B}",
+              "--max-client-batch-size", "64", "--auto-truncate", "--max-batch-tokens", "4096"]
+    mem_limit: 4g
+    volumes:
+      - hfcache:/data
+    ports:
+      - "127.0.0.1:8081:80"
+
+  tei-rerank:
+    profiles: ["cpu-models"]
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.8
+    command: ["--model-id", "${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}",
+              "--auto-truncate", "--max-batch-tokens", "4096"]
+    mem_limit: 4g
+    volumes:
+      - hfcache:/data
+    ports:
+      - "127.0.0.1:8082:80"
+
+  migrate:
+    build:
+      context: ./backend
+      target: api
+    env_file: .env
+    volumes:
+      - ./backend:/app
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  api:
+    build:
+      context: ./backend
+      target: api
+    env_file: .env
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    volumes:
+      - ./backend:/app
+    ports:
+      - "127.0.0.1:8000:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  worker:
+    build:
+      context: ./backend
+      target: worker
+    env_file: .env
+    command: ["arq", "app.workers.settings.WorkerSettings"]
+    volumes:
+      - ./backend:/app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  frontend:
+    build: ./frontend
+    environment:
+      VITE_API_PROXY: http://api:8000
+      VITE_POLL: "1"
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/vite.config.ts:/app/vite.config.ts
+      - ./frontend/index.html:/app/index.html
+    ports:
+      # Host 3000: Hyper-V reserves 5158-5257 on this PC after restarts (5173 bind fails).
+      - "127.0.0.1:3000:5173"
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
+  hfcache:

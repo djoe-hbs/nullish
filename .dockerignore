@@ -1,0 +1,6 @@
+# Root build context is only used by deploy/web.Dockerfile: send just what it needs.
+*
+!frontend
+!deploy/Caddyfile
+frontend/node_modules
+frontend/dist
