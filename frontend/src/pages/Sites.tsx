@@ -7,7 +7,6 @@ import {
   Clock,
   FileText,
   Globe,
-  LibraryBig,
   Loader2,
   Pause,
   Play,
@@ -348,13 +347,6 @@ export default function Sites() {
 
   return (
     <section className="space-y-4">
-      <div className="page-heading">
-        <span className="page-icon"><LibraryBig /></span>
-        <div>
-          <h1>Site library</h1>
-          <p>The websites Live sites chat answers from. Tap a site for details.</p>
-        </div>
-      </div>
       <AddSite />
       {isLoading && <p className="text-sm text-zinc-500">Loading sites…</p>}
       {error && <p className="form-error">{String(error.message)}</p>}

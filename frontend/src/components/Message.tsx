@@ -4,13 +4,18 @@ import {
   Check,
   ChevronDown,
   Copy,
+  Database,
   Info,
   ShieldAlert,
   ShieldCheck,
   Sparkles,
 } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 import { Fragment, lazy, Suspense, useState } from "react";
-import { timeAgo, type AskDone, type ChatDone, type ChatTurn, type Source } from "../api/client";
+import {
+  getChange, timeAgo, type AskDone, type ChatDone, type ChatTurn, type QueryRecord, type Source,
+} from "../api/client";
+import ApprovalCard, { ResultGrid } from "./ApprovalCard";
 import Collapse from "./Collapse";
 
 export type Mode = "sites" | "model";
@@ -22,6 +27,7 @@ export type Msg = ChatTurn & {
   pending?: boolean;
   status?: string;
   sources?: Source[];
+  queries?: QueryRecord[];
 };
 
 const AnswerText = lazy(() => import("../AnswerText"));
@@ -101,6 +107,53 @@ function SourcesPanel({ sources, cited }: { sources: Source[]; cited: number[] |
   );
 }
 
+const QUERY_STATUS: Record<QueryRecord["status"], string> = {
+  ok: "ran", error: "failed", refused: "refused", pending: "waiting for approval", applied: "applied",
+};
+
+/** A queued change's status comes from the server (it may have been approved since). */
+function QueryStatus({ q }: { q: QueryRecord }) {
+  const { data } = useQuery({
+    queryKey: ["change", q.pending?.id],
+    queryFn: () => getChange(q.pending!.id),
+    enabled: !!q.pending,
+    staleTime: 10_000,
+    retry: false,
+  });
+  const live = data?.status;
+  const status = q.pending && live && live !== "pending" ? live : q.status;
+  const text = live && live !== "pending" ? live : QUERY_STATUS[q.status];
+  return <span className={`query-status ${status}`}>{text}</span>;
+}
+
+function QueriesPanel({ queries }: { queries: QueryRecord[] }) {
+  return (
+    <div className="panel">
+      <div className="panel-row"><span>What Smish ran on the database</span></div>
+      <ol className="query-list">
+        {queries.map((q) => (
+          <li key={q.n} className={`query-item ${q.status}`}>
+            <div className="query-head">
+              <span className="src-num">Q{q.n}</span>
+              <span className="query-purpose">{q.purpose || (q.action === "change" ? "Change" : "Query")}</span>
+              <QueryStatus q={q} />
+              {q.status === "ok" && <span className="query-meta">
+                {q.rows.length}{q.truncated ? "+" : ""} row{q.rows.length === 1 ? "" : "s"}
+                {q.ms != null && ` · ${q.ms} ms`}</span>}
+              {q.status === "applied" && <span className="query-meta">{q.rowcount ?? 0} row(s) changed</span>}
+            </div>
+            {q.sql && <pre className="query-sql">{q.sql}</pre>}
+            {q.error && <p className="query-error">{q.error}</p>}
+            {q.status === "ok" && q.columns.length > 0 && (
+              <ResultGrid table={{ columns: q.columns, rows: q.rows }} max={20} truncated={q.truncated} />
+            )}
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
 function DetailsPanel({ meta }: { meta: ChatDone | AskDone }) {
   const ask = "cited" in meta ? meta : null;
   const live = ask?.live;
@@ -132,7 +185,7 @@ function DetailsPanel({ meta }: { meta: ChatDone | AskDone }) {
 }
 
 function Footer({ m }: { m: Msg }) {
-  const [open, setOpen] = useState<"sources" | "details" | null>(null);
+  const [open, setOpen] = useState<"sources" | "details" | "queries" | null>(null);
   const [copied, setCopied] = useState(false);
   const grounded = m.mode === "sites";
   const sources = m.sources ?? [];
@@ -143,11 +196,13 @@ function Footer({ m }: { m: Msg }) {
   // (answers about the sites as a whole cite catalog entries, which aren't live-checked).
   const allLive = used.length > 0 && used.every((s) => ["verified", "updated", "new"].includes(s.live));
   const notFound = !!(m.meta && "not_found" in m.meta && m.meta.not_found);
-  const toggle = (p: "sources" | "details") => setOpen((o) => (o === p ? null : p));
+  const toggle = (p: "sources" | "details" | "queries") => setOpen((o) => (o === p ? null : p));
+  const queries = m.queries ?? [];
+  const database = m.meta && "database" in m.meta ? m.meta.database : undefined;
 
   async function copy() {
     try {
-      await navigator.clipboard.writeText(m.content.replace(/\[(\d{1,2})\]/g, ""));
+      await navigator.clipboard.writeText(m.content.replace(/\[Q?(\d{1,2})\]/g, ""));
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
     } catch { /* clipboard blocked: nothing to do */ }
@@ -170,6 +225,14 @@ function Footer({ m }: { m: Msg }) {
             : <span className="chip ok" title="Every page used was confirmed on the live site">
                 <ShieldCheck size={14} /> Verified live</span>
         )}
+        {queries.length > 0 && (
+          <button className="chip" aria-expanded={open === "queries"} onClick={() => toggle("queries")}
+            title={database ? `Queried ${database}` : undefined}>
+            <Database size={14} />
+            {database ? `${database} · ` : ""}{queries.length} quer{queries.length > 1 ? "ies" : "y"}
+            <ChevronDown size={13} className="chev" />
+          </button>
+        )}
         {!grounded && <span className="chip" title="Not based on your sites"><Sparkles size={13} /> Model only</span>}
         {m.content && (
           <button className="icon-btn" aria-label={copied ? "Copied" : "Copy answer"} title="Copy" onClick={copy}>
@@ -185,6 +248,9 @@ function Footer({ m }: { m: Msg }) {
       </div>
       <Collapse open={open === "sources"}>
         {open === "sources" && <SourcesPanel sources={sources} cited={cited} />}
+      </Collapse>
+      <Collapse open={open === "queries"}>
+        {open === "queries" && <QueriesPanel queries={queries} />}
       </Collapse>
       <Collapse open={open === "details"}>
         {open === "details" && m.meta && <DetailsPanel meta={m.meta} />}
@@ -210,13 +276,18 @@ export function Bubble({ m }: { m: Msg }) {
           )}
           {m.content && (
             <Suspense fallback={<div className="answer">{m.content}</div>}>
-              <AnswerText grounded={grounded} sources={m.sources ?? []} content={m.content} />
+              <AnswerText grounded={grounded} sources={m.sources ?? []} queries={m.queries ?? []}
+                content={m.content} />
             </Suspense>
           )}
           {m.pending && m.content && <span className="caret" aria-hidden />}
           {m.error && <p className="msg-error">{m.error}</p>}
         </div>
-        {!m.pending && (m.meta || (m.sources?.length ?? 0) > 0) && <Footer m={m} />}
+        {(m.queries ?? []).filter((q) => q.pending).map((q) => (
+          <ApprovalCard key={q.pending!.id} change={q.pending!} />
+        ))}
+        {!m.pending && (m.meta || (m.sources?.length ?? 0) > 0 || (m.queries?.length ?? 0) > 0)
+          && <Footer m={m} />}
       </div>
     </div>
   );

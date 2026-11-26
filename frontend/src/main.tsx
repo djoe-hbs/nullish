@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import App from "./App";
 import "./index.css";
 import "./cozy.css";
+import "./sources.css";
 
 const queryClient = new QueryClient();
 

@@ -177,3 +177,110 @@ class UserSession(TimestampMixin, Base):
     ip: Mapped[str | None] = mapped_column(String(64))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# --------------------------------------------------------------------------------------------
+# Database connections ("ask your database")
+# --------------------------------------------------------------------------------------------
+
+EDIT_POLICIES = ("read_only", "ask", "auto")
+DB_KINDS = ("postgres", "mysql")
+SSL_MODES = ("disable", "prefer", "require", "verify")
+
+
+class DataSource(TimestampMixin, Base):
+    __tablename__ = "data_sources"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(200), unique=True)
+    kind: Mapped[str] = mapped_column(String(20))  # postgres | mysql
+    host: Mapped[str] = mapped_column(Text)
+    port: Mapped[int] = mapped_column(Integer)
+    database: Mapped[str] = mapped_column(Text)
+    username: Mapped[str] = mapped_column(Text)
+    password_encrypted: Mapped[str | None] = mapped_column(Text)  # never returned by the API
+    ssl_mode: Mapped[str] = mapped_column(String(10), default="prefer", server_default="prefer")
+    # read_only: never edit | ask: every change needs approval | auto: data changes run
+    # directly (schema changes still need approval)
+    edit_policy: Mapped[str] = mapped_column(
+        String(10), default="read_only", server_default="read_only")
+    row_limit: Mapped[int] = mapped_column(Integer, default=200, server_default="200")
+    timeout_sec: Mapped[int] = mapped_column(Integer, default=15, server_default="15")
+    description: Mapped[str | None] = mapped_column(Text)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    last_test_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_test_ok: Mapped[bool | None] = mapped_column(Boolean)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    server_version: Mapped[str | None] = mapped_column(Text)
+    schema_refreshed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    schema_error: Mapped[str | None] = mapped_column(Text)
+
+
+class DsSchemaItem(Base):
+    """One table (column_name NULL) or one column of a connected database."""
+
+    __tablename__ = "ds_schema_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("data_sources.id", ondelete="CASCADE"), index=True)
+    schema_name: Mapped[str] = mapped_column(Text)
+    table_name: Mapped[str] = mapped_column(Text)
+    column_name: Mapped[str | None] = mapped_column(Text)
+    ordinal: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    data_type: Mapped[str | None] = mapped_column(Text)  # column type, or "table" / "view"
+    nullable: Mapped[bool | None] = mapped_column(Boolean)
+    is_pk: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    fk_ref: Mapped[str | None] = mapped_column(Text)  # "table.column"
+    row_estimate: Mapped[int | None] = mapped_column(BigInteger)
+    sample_values: Mapped[list[Any]] = mapped_column(JSONB, default=list, server_default="[]")
+    comment: Mapped[str | None] = mapped_column(Text)  # from the database itself
+    note: Mapped[str | None] = mapped_column(Text)  # the user's explanation (glossary)
+    hidden: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBED_DIM))
+
+
+class DsPendingChange(Base):
+    """A change waiting for the user's approval."""
+
+    __tablename__ = "ds_pending_changes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("data_sources.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    sql: Mapped[str] = mapped_column(Text)
+    sql_hash: Mapped[str] = mapped_column(String(64))
+    kind: Mapped[str] = mapped_column(String(10))  # write | ddl
+    reason: Mapped[str | None] = mapped_column(Text)
+    preview: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, server_default="{}")
+    # pending | applied | rejected | expired | failed
+    status: Mapped[str] = mapped_column(String(10), default="pending", server_default="pending")
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decided_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+
+
+class DsQueryLog(Base):
+    """Audit log: every statement Smish ran, refused or queued against a connected database."""
+
+    __tablename__ = "ds_query_log"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("data_sources.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    sql: Mapped[str] = mapped_column(Text)
+    kind: Mapped[str] = mapped_column(String(10))  # read | write | ddl | blocked
+    # ok | error | refused | pending | applied | rejected
+    status: Mapped[str] = mapped_column(String(10))
+    rows: Mapped[int | None] = mapped_column(Integer)
+    ms: Mapped[int | None] = mapped_column(Integer)
+    error: Mapped[str | None] = mapped_column(Text)
+    pending_id: Mapped[int | None] = mapped_column(
+        ForeignKey("ds_pending_changes.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True)

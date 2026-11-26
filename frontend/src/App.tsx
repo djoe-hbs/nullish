@@ -7,7 +7,7 @@ import AccountMenu from "./components/AccountMenu";
 import Chat from "./pages/Chat";
 import Login from "./pages/Login";
 import { CHAT_TITLE_EVENT, getChatTitle } from "./pageTitle";
-import Sites from "./pages/Sites";
+import Sources from "./pages/Sources";
 import Status from "./pages/Status";
 
 type Tab = "chat" | "sites" | "status";
@@ -64,13 +64,13 @@ export default function App() {
   useEffect(() => {
     const page = !signedIn ? "Sign in"
       : tab === "chat" ? (chatTitle || "New chat")
-      : tab === "sites" ? "Site library" : "Status";
+      : tab === "sites" ? "Sources" : "Status";
     document.title = `${page} · Smish`;
   }, [signedIn, tab, chatTitle]);
 
   const tabs = [
     { id: "chat", label: "Chat", icon: MessageCircle },
-    { id: "sites", label: "Site library", icon: LibraryBig },
+    { id: "sites", label: "Sources", icon: LibraryBig },
     { id: "status", label: "Status", icon: Activity },
   ] as const;
 
@@ -103,7 +103,7 @@ export default function App() {
         <div className="h-full" hidden={tab !== "chat"}><Chat /></div>
         {tab !== "chat" && <div className="page-scroll"><motion.div key={tab} className="library-wrap"
           initial={{opacity:0,y:6}} animate={{opacity:1,y:0}} transition={{duration:.2}}>
-          {tab === "sites" ? <Sites/> : <Status/>}
+          {tab === "sites" ? <Sources/> : <Status/>}
         </motion.div></div>}
       </main>
     </div>

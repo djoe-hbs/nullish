@@ -42,10 +42,23 @@ curl.exe "http://localhost:8000/api/v1/health?deep=true"
 - **Sites** tab: add a site URL. It's crawled right away: robots.txt, then the sitemap, then links
   within the site. JavaScript-only sites are rendered in a headless browser automatically.
   The page shows crawl progress, pages, errors and how much of the site is embedded.
-- **Chat** tab, **Your sites** mode: answers only from your sites, with a clickable `[n]` citation
+- **Chat** tab, **Your sources** mode: answers only from your sites, with a clickable `[n]` citation
   for each claim and a Sources list that shows when each page was fetched. Use the site chips to
-  limit a question to some sites. Questions the sites can't answer get
-  "I couldn't find this on the configured sites."
+  limit a question to some sites. When the sites don't have the answer, it says so in its own
+  words.
+- **Sources → Databases:** connect a PostgreSQL or MySQL/MariaDB database and choose what Smish
+  may do with it:
+  - **Never edit:** read only (also enforced with read-only transactions).
+  - **Ask before editing:** each change is tried out (rolled back) and shown as an approval card
+    with a before/after preview; nothing changes until you click Approve.
+  - **Edit automatically:** data changes run right away; schema changes still need approval.
+  Ask questions in chat ("how many orders are pending?"); Smish writes the SQL, runs it, and
+  cites each query as Q1, Q2 (the SQL and results are under the answer). Hide tables or columns
+  Smish must never see, and add notes that explain what the data means. Every statement is
+  logged (card → Query log). Details: [docs/db-connections-plan.md](docs/db-connections-plan.md).
+  Sample databases for trying it out: `docker compose --profile testdbs up -d testdb-postgres
+  testdb-mysql` (host `testdb-postgres` / `testdb-mysql`, database/user/password `shop`; needs
+  `ALLOW_PRIVATE_DB_HOSTS=true`, already set in the dev `.env`).
 - **Chat** tab, **Model only** mode: a plain chat with the model, not grounded in your sites.
 
 Conversations are saved in this browser with their sources and site selection. Choose a

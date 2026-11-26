@@ -24,7 +24,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
-from app.db.models import Chunk, Page, Site
+from app.db.models import Chunk, DataSource, Page, Site
 from app.freshness.live import LiveResult, LiveVerifier
 from app.llm.chat import ChatTarget
 from app.llm.embed import EmbedClient
@@ -282,10 +282,37 @@ def source_payload(n: int, c: Candidate) -> dict:
 
 
 async def sites_in_scope(db: AsyncSession, site_ids: list[int] | None) -> list[Site]:
+    """None = every enabled site; a list (also an empty one) = just those."""
     q = select(Site).where(Site.enabled)
-    if site_ids:
-        q = q.where(Site.id.in_(site_ids))
+    if site_ids is not None:
+        q = q.where(Site.id.in_(site_ids or [-1]))
     return list(await db.scalars(q))
+
+
+async def dbs_in_scope(db: AsyncSession, source_ids: list[int] | None) -> list[DataSource]:
+    q = select(DataSource).where(DataSource.enabled).order_by(DataSource.id)
+    if source_ids is not None:
+        q = q.where(DataSource.id.in_(source_ids or [-1]))
+    return list(await db.scalars(q))
+
+
+def pick_database(name: str | None, dbs: list[DataSource], question: str) -> DataSource:
+    """The database the router named (tolerating case and small typos), else the one whose name
+    appears in the question, else the first one."""
+    if name:
+        low = name.casefold()
+        for d in dbs:
+            if d.name.casefold() == low:
+                return d
+        close = [d for d in dbs if edit_distance(d.name.casefold(), low) <= 2
+                 or low in d.name.casefold() or d.name.casefold() in low]
+        if close:
+            return close[0]
+    q = question.casefold()
+    for d in dbs:
+        if d.name.casefold() in q:
+            return d
+    return dbs[0]
 
 
 async def chunk_count(db: AsyncSession, site_ids: list[int]) -> int:
@@ -373,7 +400,8 @@ _SMALLTALK = [
 SMALLTALK = re.compile(r"(?:" + "|".join(f"(?:{p})" for p in _SMALLTALK) + r")")
 
 CHAT_PROMPT = """You are Smish, a friendly assistant that answers questions from these \
-websites: {sites}. The user is chatting casually, not asking for information from the sites. \
+websites and databases: {sites}. The user is chatting casually, not asking for information \
+from the sites. \
 Reply naturally and briefly, like a person would. If it fits (a greeting, "who are you", "what \
 can you do"), mention that you can answer questions about those websites, checked live. You \
 can't see the websites' pages in this reply, so don't make any claims about the websites, \
@@ -463,11 +491,12 @@ def history_of(messages: list[dict], n: int = HISTORY_MESSAGES) -> list[dict]:
 
 
 async def chat_reply(messages: list[dict], sites: list[Site], *, chat: ChatTarget,
-                     start: float) -> AsyncIterator[str]:
+                     start: float, dbs: list[DataSource] | None = None) -> AsyncIterator[str]:
+    names = [s.name for s in sites] + [f"{d.name} (database)" for d in dbs or []]
     prompt = [
         {"role": "system", "content": CHAT_PROMPT.format(
-            sites=", ".join(s.name for s in sites)
-            or "(none added yet: suggest adding one on the Site library page)")},
+            sites=", ".join(names)
+            or "(none added yet: suggest adding one on the Sources page)")},
         *[{"role": m["role"], "content": m["content"]} for m in messages[-6:]],
     ]
     out = Streamed()
@@ -522,6 +551,8 @@ async def answer_stream(
     reranker: RerankClient | None,
     live: LiveVerifier | None = None,
     max_tokens: int | None = None,  # None = no limit (null to vLLM)
+    source_ids: list[int] | None = None,  # databases in scope; None = all enabled
+    user_id: int | None = None,  # for the database audit log
 ) -> AsyncIterator[str]:
     start = time.perf_counter()
     question = messages[-1]["content"]
@@ -529,27 +560,56 @@ async def answer_stream(
 
     async with sessions() as db:
         sites = await sites_in_scope(db, site_ids)
-        if not sites:
+        dbs = await dbs_in_scope(db, source_ids)
+        if not sites and not dbs:
             if is_smalltalk(question):  # a fresh install still says hello back
                 async for event in chat_reply(messages, sites, chat=chat, start=start):
                     yield event
                 return
-            yield sse("error", {"message": "No sites are set up yet. Add one on the Sites page."})
+            yield sse("error", {"message": "No sites or databases are set up yet. Add one on "
+                                           "the Sources page."})
             return
-        messages = [*messages[:-1], {**messages[-1],
-                                     "content": fix_site_name_typos(question, sites)}]
-        question = messages[-1]["content"]
+        if sites:
+            messages = [*messages[:-1], {**messages[-1],
+                                         "content": fix_site_name_typos(question, sites)}]
+            question = messages[-1]["content"]
 
         # 1. What does this message need? (greetings skip the model call entirely)
+        route = None
         if is_smalltalk(question):
             intent, query, routed = "chat", "", False
         else:
             yield sse("status", {"stage": "understanding"})
-            route = await route_message(chat, messages, sites, retrieval_query(messages))
+            route = await route_message(chat, messages, sites, retrieval_query(messages), dbs)
             intent, query, routed = route.intent, route.query, route.by == "model"
 
+        if intent == "database" and dbs and route is not None:
+            from app.datasources.agent import database_answer  # (imports this module)
+            from app.datasources.schema import load_schema, refresh_schema
+
+            src = pick_database(route.database, dbs, question)
+            if src.schema_refreshed_at is None:  # first question: read its structure now
+                yield sse("status", {"stage": "reading_schema", "database": src.name})
+                try:
+                    await refresh_schema(db, src, settings, embedder)
+                except Exception as exc:  # noqa: BLE001
+                    yield sse("error", {"message": f"Couldn't read {src.name}: {exc}"})
+                    return
+            tables = await load_schema(db, src)
+            db.expunge(src)
+            asked = query if routed and query else question
+            async for event in database_answer(
+                asked, history_of(messages), src, tables, wants_change=route.change,
+                settings=settings, sessions=sessions, chat=chat, embedder=embedder,
+                user_id=user_id, max_tokens=max_tokens, start=start,
+            ):
+                yield event
+            return
+        if intent in ("search", "sites_overview") and not sites:
+            intent = "chat"
+
         if intent == "chat":
-            async for event in chat_reply(messages, sites, chat=chat, start=start):
+            async for event in chat_reply(messages, sites, chat=chat, start=start, dbs=dbs):
                 yield event
             return
 

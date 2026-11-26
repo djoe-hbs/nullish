@@ -22,7 +22,7 @@ export class ApiError extends Error {
 }
 
 /** Fired when the server says the session is gone (401): the app shows the sign-in page. */
-export const SIGNED_OUT_EVENT = "nullish:signed-out";
+export const SIGNED_OUT_EVENT = "smish:signed-out";
 function noteStatus(res: Response, path: string) {
   if (res.status === 401 && !path.startsWith("/auth/")) {
     window.dispatchEvent(new Event(SIGNED_OUT_EVENT));
@@ -151,6 +151,132 @@ export const crawlSite = (id: number) => api<CrawlJob>(`/sites/${id}/crawl`, { m
 export const listPages = (id: number, q = "") =>
   api<PageRow[]>(`/sites/${id}/pages?limit=200${q ? `&q=${encodeURIComponent(q)}` : ""}`);
 
+// ---- Databases ------------------------------------------------------------------------------
+
+export type DbKind = "postgres" | "mysql";
+export type EditPolicy = "read_only" | "ask" | "auto";
+export type SslMode = "disable" | "prefer" | "require" | "verify";
+
+export type DataSource = {
+  id: number;
+  name: string;
+  kind: DbKind;
+  host: string;
+  port: number;
+  database: string;
+  username: string;
+  has_password: boolean;
+  ssl_mode: SslMode;
+  edit_policy: EditPolicy;
+  row_limit: number;
+  timeout_sec: number;
+  description: string | null;
+  enabled: boolean;
+  last_test_at: string | null;
+  last_test_ok: boolean | null;
+  last_error: string | null;
+  server_version: string | null;
+  schema_refreshed_at: string | null;
+  schema_error: string | null;
+  tables: number;
+  created_at: string;
+};
+
+export type DataSourceInput = Partial<Pick<DataSource,
+  "name" | "description" | "host" | "port" | "database" | "username" | "ssl_mode" |
+  "edit_policy" | "row_limit" | "timeout_sec" | "enabled">> & { kind?: DbKind; password?: string };
+
+export type SchemaItem = {
+  id: number;
+  schema_name: string;
+  table_name: string;
+  column_name: string | null;
+  data_type: string | null;
+  nullable: boolean | null;
+  is_pk: boolean;
+  fk_ref: string | null;
+  row_estimate: number | null;
+  sample_values: string[];
+  comment: string | null;
+  note: string | null;
+  hidden: boolean;
+};
+
+export type QueryLogRow = {
+  id: number;
+  sql: string;
+  kind: "read" | "write" | "ddl" | "blocked";
+  status: string;
+  rows: number | null;
+  ms: number | null;
+  error: string | null;
+  pending_id: number | null;
+  created_at: string;
+};
+
+export type ResultTable = { columns: string[]; rows: unknown[][] };
+
+export type ChangePreview = {
+  rowcount: number | null;
+  before: ResultTable | null;
+  after: ResultTable | null;
+  note: string | null;
+};
+
+export type PendingChange = {
+  id: number;
+  source_id?: number;
+  source: string;
+  sql: string;
+  kind: "write" | "ddl";
+  reason: string | null;
+  preview: ChangePreview;
+  status?: "pending" | "applied" | "rejected" | "expired" | "failed";
+  result?: { rowcount?: number | null; ms?: number; error?: string } | null;
+  expires_at: string;
+};
+
+/** One statement Smish ran (or refused / queued) while answering. */
+export type QueryRecord = {
+  n: number;
+  sql: string;
+  purpose: string;
+  action: "query" | "change";
+  kind: "read" | "write" | "ddl" | "blocked";
+  status: "ok" | "error" | "refused" | "pending" | "applied";
+  columns: string[];
+  rows: unknown[][];
+  truncated: boolean;
+  rowcount: number | null;
+  ms: number | null;
+  error: string | null;
+  pending: PendingChange | null;
+};
+
+export type TestResult = { ok: boolean; version: string | null; error: string | null };
+
+export const listSources = () => api<DataSource[]>("/data-sources");
+export const testSource = (body: DataSourceInput) =>
+  api<TestResult>("/data-sources/test", { method: "POST", body: JSON.stringify(body) });
+export const createSource = (body: DataSourceInput) =>
+  api<DataSource>("/data-sources", { method: "POST", body: JSON.stringify(body) });
+export const updateSource = (id: number, body: DataSourceInput) =>
+  api<DataSource>(`/data-sources/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+export const deleteSource = (id: number) => api<void>(`/data-sources/${id}`, { method: "DELETE" });
+export const retestSource = (id: number) =>
+  api<TestResult>(`/data-sources/${id}/test`, { method: "POST" });
+export const refreshSchema = (id: number) =>
+  api<DataSource>(`/data-sources/${id}/refresh-schema`, { method: "POST" });
+export const getSchema = (id: number) => api<SchemaItem[]>(`/data-sources/${id}/schema`);
+export const patchSchema = (id: number, items: { id: number; note?: string | null; hidden?: boolean }[]) =>
+  api<SchemaItem[]>(`/data-sources/${id}/schema`, { method: "PATCH", body: JSON.stringify(items) });
+export const getQueryLog = (id: number) => api<QueryLogRow[]>(`/data-sources/${id}/log?limit=50`);
+export const getChange = (id: number) => api<PendingChange>(`/changes/${id}`);
+export const approveChange = (id: number) =>
+  api<PendingChange>(`/changes/${id}/approve`, { method: "POST" });
+export const rejectChange = (id: number) =>
+  api<PendingChange>(`/changes/${id}/reject`, { method: "POST" });
+
 // ---- Streaming (SSE over POST; EventSource can't send a body) -------------------------------
 
 async function postSSE(
@@ -249,6 +375,9 @@ export type LiveStats = {
 };
 
 export type AskDone = ChatDone & {
+  intent?: string;
+  database?: string;
+  queries?: number;
   cited: number[];
   invalid_citations: number[];
   not_found?: boolean;
@@ -256,8 +385,14 @@ export type AskDone = ChatDone & {
   live?: LiveStats | null;
 };
 
+export type AskStatus = {
+  stage: string; sites?: number; sources?: number; pages?: number; database?: string; n?: number;
+  queries?: number;
+} & LiveStats;
+
 export type AskHandlers = {
-  onStatus: (s: { stage: string; sites?: number; sources?: number; pages?: number } & LiveStats) => void;
+  onStatus: (s: AskStatus) => void;
+  onQuery: (q: QueryRecord) => void;
   onSources: (s: Source[]) => void;
   onToken: (text: string) => void;
   /** The server cleaned the streamed answer (unsupported sentences removed, or withdrawn when
@@ -267,17 +402,19 @@ export type AskHandlers = {
   onError: (message: string) => void;
 };
 
+/** scope: null = every enabled site and database; otherwise just these ids. */
 export function streamAsk(
   messages: ChatTurn[],
-  siteIds: number[],
+  scope: { siteIds: number[]; sourceIds: number[] } | null,
   h: AskHandlers,
   signal: AbortSignal,
 ) {
   return postSSE(
     "/ask",
-    { messages, site_ids: siteIds.length ? siteIds : null },
+    { messages, site_ids: scope ? scope.siteIds : null, source_ids: scope ? scope.sourceIds : null },
     (event, p) => {
       if (event === "status") h.onStatus(p);
+      else if (event === "query") h.onQuery(p);
       else if (event === "sources") h.onSources(p);
       else if (event === "token") h.onToken(p.t);
       else if (event === "replace") h.onReplace(p.t);

@@ -37,6 +37,9 @@ private network.
 3. **Keep `ALLOW_PRIVATE_URLS=false`.** Setting it to `true` lets anyone who can add a site
    make the server fetch internal addresses (an SSRF hole).
 4. **Keep `COOKIE_SECURE=true`** in production.
+4a. **`ALLOW_PRIVATE_DB_HOSTS`** stays `false` unless the operator says their databases are on a
+   private network the VPS can reach. Ask; don't guess. Smish's own Postgres/Redis are refused
+   either way.
 5. **Don't edit application code to make a check pass.** If a verification fails twice, stop and
    report the failing step, the command and its output.
 

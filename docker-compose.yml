@@ -116,6 +116,39 @@ services:
     depends_on:
       - api
 
+  # Sample "shop" databases for developing/testing database connections:
+  #   docker compose --profile testdbs up -d testdb-postgres testdb-mysql
+  # In Smish: host testdb-postgres:5432 (or testdb-mysql:3306), database shop, user shop,
+  # password shop. Needs ALLOW_PRIVATE_DB_HOSTS=true (they're on the Docker network).
+  testdb-postgres:
+    image: postgres:16-alpine
+    profiles: ["testdbs"]
+    environment:
+      POSTGRES_USER: shop
+      POSTGRES_PASSWORD: shop
+      POSTGRES_DB: shop
+    volumes:
+      - ./testdbs/postgres-shop.sql:/docker-entrypoint-initdb.d/shop.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shop -d shop"]
+      interval: 3s
+      retries: 20
+
+  testdb-mysql:
+    image: mysql:8.4
+    profiles: ["testdbs"]
+    environment:
+      MYSQL_ROOT_PASSWORD: shoproot
+      MYSQL_DATABASE: shop
+      MYSQL_USER: shop
+      MYSQL_PASSWORD: shop
+    volumes:
+      - ./testdbs/mysql-shop.sql:/docker-entrypoint-initdb.d/shop.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-ushop", "-pshop"]
+      interval: 3s
+      retries: 40
+
 volumes:
   pgdata:
   hfcache:

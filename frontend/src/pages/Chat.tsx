@@ -1,5 +1,5 @@
 import { Pencil, Trash2 } from "lucide-react";
-import { ArrowDown, ArrowUp, ArrowUpRight, ChevronDown, Compass, Globe2, History, LibraryBig, ListTree, MessageCircle, Plus, Sparkles, Square, Tag } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpRight, ChevronDown, Compass, Database, Globe2, History, LibraryBig, ListTree, MessageCircle, Plus, Sparkles, Square, Tag } from "lucide-react";
 import { motion } from "motion/react";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
@@ -10,8 +10,10 @@ import {
   fetchHealth,
   generateTitle,
   listSites,
+  listSources,
   streamAsk,
   streamChat,
+  type AskStatus,
   type ChatTurn,
   type LiveStats,
 } from "../api/client";
@@ -43,8 +45,11 @@ function liveSummary(s: LiveStats): string {
   return parts.join(" · ");
 }
 
-function statusText(s: { stage: string; sites?: number; sources?: number; pages?: number } & LiveStats) {
+function statusText(s: AskStatus) {
   if (s.stage === "understanding") return "Thinking…";
+  if (s.stage === "reading_schema") return `Reading the structure of ${s.database ?? "the database"}…`;
+  if (s.stage === "querying") return s.n ? `Running query ${s.n}…` : `Querying ${s.database ?? "the database"}…`;
+  if (s.stage === "writing" && s.queries !== undefined) return "Writing the answer…";
   if (s.stage === "searching") return `Searching ${plural(s.sites, "site")}…`;
   if (s.stage === "verifying") return `Checking ${plural(s.pages, "page")} on the live site…`;
   if (s.stage === "verified") return `${liveSummary(s)}…`;
@@ -53,6 +58,8 @@ function statusText(s: { stage: string; sites?: number; sources?: number; pages?
 
 // titleSource: "auto" = first question (placeholder), "llm" = written by the model after the
 // first answer, "user" = renamed by hand (never overwritten).
+// selected: the scope chips. Website ids are stored as they are, database ids as negative numbers
+// (so older saved conversations, which only have site ids, still load). Empty = everything.
 type Conversation = { id: string; title: string; updated: number; messages: Msg[];
   mode: Mode; selected: number[]; titleSource?: "auto" | "llm" | "user" };
 
@@ -175,13 +182,20 @@ export default function Chat() {
     retry: false,
   });
   const { data: sites } = useQuery({ queryKey: ["sites"], queryFn: listSites, retry: false });
+  const { data: dbs } = useQuery({ queryKey: ["data-sources"], queryFn: listSources, retry: false });
   const enabledSites = (sites ?? []).filter((s) => s.enabled);
+  const enabledDbs = (dbs ?? []).filter((d) => d.enabled);
+  const scopeItems = [
+    ...enabledSites.map((s) => ({ key: s.id, name: s.name, db: false })),
+    ...enabledDbs.map((d) => ({ key: -d.id, name: d.name, db: true })),
+  ];
   const chat = health?.services.chat;
   const online = chat?.ok ?? false;
   // Block sending only when we KNOW it can't work; while the first checks are still loading,
   // let the question through (the server answers with a clear error if something is down).
   const knownOffline = health !== undefined && !online;
-  const noSites = sites !== undefined && enabledSites.length === 0;
+  const noSites = sites !== undefined && dbs !== undefined
+    && enabledSites.length === 0 && enabledDbs.length === 0;
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const [atBottom, setAtBottom] = useState(true);
@@ -261,11 +275,15 @@ export default function Chat() {
     };
     try {
       if (turnMode === "sites") {
+        const scope = selected.length
+          ? { siteIds: selected.filter((k) => k > 0), sourceIds: selected.filter((k) => k < 0).map((k) => -k) }
+          : null;
         await streamAsk(
           history,
-          selected,
+          scope,
           {
             ...common,
+            onQuery: (q) => updateLast((m) => ({ ...m, queries: [...(m.queries ?? []), q] })),
             onStatus: (s) =>
               updateLast((m) => ({
                 ...m,
@@ -438,30 +456,30 @@ export default function Chat() {
           <HistoryRow key={c.id} chat={c} current={active === c.id} disabled={busy}
             onOpen={() => openChat(c)} onRename={(t) => renameChat(c.id, t)}
             onDelete={() => deleteChat(c.id)} />)}
-        <a className="rail-library" href="#sites"><LibraryBig size={18}/> Site library <ArrowUpRight size={15}/></a>
+        <a className="rail-library" href="#sites"><LibraryBig size={18}/> Sources <ArrowUpRight size={15}/></a>
       </aside>
       <section className="min-w-0 min-h-0 flex flex-col">
       {saveError && <p role="alert">Browser storage is full or unavailable. This chat could not be saved.</p>}
       <div className="controls">
         <div className="mode-picker">
-          {modeBtn("sites", "Live sites")}
+          {modeBtn("sites", "Your sources")}
           {modeBtn("model", "Model chat")}
         </div>
-        {mode === "sites" && enabledSites.length > 0 && (
-          <details className="scope"><summary><LibraryBig size={15}/>{selected.length ? selected.length + " selected" : "All sites"} <ChevronDown size={14}/></summary><div className="scope-list">
+        {mode === "sites" && scopeItems.length > 0 && (
+          <details className="scope"><summary><LibraryBig size={15}/>{selected.length ? selected.length + " selected" : "All sources"} <ChevronDown size={14}/></summary><div className="scope-list">
 
-            {enabledSites.map((s) => (
+            {scopeItems.map((s) => (
               <button
-                key={s.id}
-                type="button"
-                disabled={busy} aria-pressed={selected.includes(s.id)} onClick={() => toggleSite(s.id)}
-                className={`rounded-full border px-2 py-0.5 ${
-                  selected.includes(s.id)
+                key={s.key}
+                type="button" title={s.db ? "Database" : "Website"}
+                disabled={busy} aria-pressed={selected.includes(s.key)} onClick={() => toggleSite(s.key)}
+                className={`scope-chip rounded-full border px-2 py-0.5 ${
+                  selected.includes(s.key)
                     ? "border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-900"
                     : "border-zinc-300 text-zinc-600 hover:border-zinc-500 dark:border-zinc-700 dark:text-zinc-400"
                 }`}
               >
-                {s.name}
+                {s.db ? <Database size={12} /> : <Globe2 size={12} />} {s.name}
               </button>
             ))}
           </div></details>
@@ -493,10 +511,12 @@ export default function Chat() {
                 <div className="welcome-copy">
                   <h1>{mode === "sites" ? "Ask your library." : "Start a conversation."}</h1>
                   <p>{mode === "model" ? "Explore an idea or work through a question with the model."
+                    : enabledSites.length && enabledDbs.length ? "Ask about your websites and databases: live answers, with links to the pages and the queries behind them."
+                    : enabledDbs.length ? "Ask about your databases. Smish queries them and shows exactly what it ran."
                     : enabledSites.length ? "Explore your saved websites, with live answers and links to the original pages."
-                    : "Add your first website to start asking questions about its pages."}</p>
-                  {mode === "sites" && !enabledSites.length &&
-                    <a href="#sites" className="hero-link"><Plus size={16}/> Add a website</a>}
+                    : "Add a website or a database to start asking questions."}</p>
+                  {mode === "sites" && !enabledSites.length && !enabledDbs.length &&
+                    <a href="#sites" className="hero-link"><Plus size={16}/> Add a source</a>}
                 </div>
               </div>
               <h2 className="starters-heading">Conversation starters</h2>
@@ -545,7 +565,7 @@ export default function Chat() {
                 send(input);
               }
             }}
-            placeholder={mode === "sites" ? "Ask about your sites…" : "Message the model…"}
+            placeholder={mode === "sites" ? (enabledDbs.length ? "Ask about your sites or data…" : "Ask about your sites…") : "Message the model…"}
             className="min-w-0 flex-1 resize-none rounded-lg border border-zinc-300 bg-white px-3 py-2 outline-none focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-900"
           />
           {busy ? (

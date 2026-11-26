@@ -82,6 +82,18 @@ class Settings(BaseSettings):
     sitemap_cache_sec: int = 300
     robots_cache_sec: int = 3600
 
+    # --- Database connections ---
+    # Off: connected databases must be on public addresses (same idea as ALLOW_PRIVATE_URLS).
+    # On: private/internal hosts (10.x, 192.168.x, Docker services) are allowed too. Smish's own
+    # Postgres and Redis are refused either way.
+    allow_private_db_hosts: bool = False
+    db_connect_timeout_sec: float = 8.0
+    db_agent_max_steps: int = 6  # queries/lookups the model may make per question
+    db_schema_full_tables: int = 40  # up to this many tables the whole schema goes in the prompt
+    db_schema_top_tables: int = 12  # larger schemas: most relevant tables per question
+    db_rows_to_model: int = 50  # result rows shown to the model per query
+    db_change_expiry_min: int = 10  # how long an approval card stays valid
+
 
 @lru_cache
 def get_settings() -> Settings:
