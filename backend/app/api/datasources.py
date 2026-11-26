@@ -4,6 +4,7 @@ approval of pending changes. Passwords are write-only: stored encrypted, never r
 from datetime import UTC, datetime
 from typing import Annotated, Literal
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
@@ -21,6 +22,7 @@ from app.db.session import get_session
 from app.llm.embed import get_embedder
 from app.security.crypto import SecretUnreadable, encrypt
 
+log = structlog.get_logger()
 router = APIRouter(tags=["databases"])
 
 DB = Annotated[AsyncSession, Depends(get_session)]
@@ -169,6 +171,10 @@ async def run_test(src: DataSource, password: str | None = None) -> TestResult:
             return TestResult(ok=True, version=await conn.version())
     except (DbError, HostNotAllowed, SecretUnreadable) as exc:
         return TestResult(ok=False, error=str(exc))
+    except Exception as exc:  # noqa: BLE001 - a test must always come back with an answer
+        log.warning("db_test_failed", kind=src.kind, error=f"{type(exc).__name__}: {exc}"[:300])
+        return TestResult(ok=False, error=f"couldn't connect ({type(exc).__name__}: "
+                                          f"{str(exc)[:200] or 'no details'})")
 
 
 async def record_test(db: AsyncSession, src: DataSource, res: TestResult) -> None:
@@ -222,8 +228,10 @@ async def create_source(body: SourceCreate, db: DB) -> SourceOut:
     if res.ok:
         try:
             tables = await refresh_schema(db, src, get_settings(), get_embedder())
-        except DbError:
-            pass  # shown as schema_error on the card
+        except Exception as exc:  # noqa: BLE001 - shown as schema_error on the card
+            if not isinstance(exc, DbError):
+                src.schema_error = f"couldn't read the tables: {type(exc).__name__}: {exc}"[:500]
+                await db.commit()
     return out(src, tables)
 
 
@@ -271,6 +279,10 @@ async def refresh(source_id: int, db: DB) -> SourceOut:
         tables = await refresh_schema(db, src, get_settings(), get_embedder())
     except (DbError, HostNotAllowed, SecretUnreadable) as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        log.warning("schema_refresh_failed", source=src.id, error=f"{type(exc).__name__}: {exc}")
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY,
+                            f"couldn't read the tables: {type(exc).__name__}: {exc}"[:300]) from exc
     return out(src, tables)
 
 

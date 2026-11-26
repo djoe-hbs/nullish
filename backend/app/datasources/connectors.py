@@ -221,14 +221,17 @@ class PostgresConn:
                            [[to_json_value(v) for v in r] for r in rows])
 
     async def introspect(self) -> dict:
-        async with self.conn.transaction(readonly=True):
-            await self._timeout()
-            return {
-                "tables": [tuple(r) for r in await self.conn.fetch(PG_TABLES)],
-                "columns": [tuple(r) for r in await self.conn.fetch(PG_COLUMNS)],
-                "pks": [tuple(r) for r in await self.conn.fetch(PG_PKS)],
-                "fks": [tuple(r) for r in await self.conn.fetch(PG_FKS)],
-            }
+        try:
+            async with self.conn.transaction(readonly=True):
+                await self._timeout()
+                return {
+                    "tables": [tuple(r) for r in await self.conn.fetch(PG_TABLES)],
+                    "columns": [tuple(r) for r in await self.conn.fetch(PG_COLUMNS)],
+                    "pks": [tuple(r) for r in await self.conn.fetch(PG_PKS)],
+                    "fks": [tuple(r) for r in await self.conn.fetch(PG_FKS)],
+                }
+        except Exception as exc:  # noqa: BLE001
+            raise DbError(f"couldn't read the tables: {_first_line(exc)}") from exc
 
 
 # ---------------------------------------------------------------------------------------------

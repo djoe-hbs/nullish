@@ -275,6 +275,30 @@ async def test_host_guard():
     assert await resolve_db_host("8.8.8.8", s) == "8.8.8.8"
 
 
+@pytest.mark.parametrize("host,message", [
+    ("db..example.com", "isn't a valid host name"),  # used to crash the API (UnicodeError)
+    (".example.com", "isn't a valid host name"),
+    ("a" * 70 + ".com", "isn't a valid host name"),
+    ("-bad.com", "isn't a valid host name"),
+    ("db.example.com:5432", "Port field"),
+    ("postgres://u:p@db.example.com/shop", "not a URL"),
+    ("", "host name or IP"),
+])
+async def test_bad_host_input_gets_a_clear_message(host, message):
+    with pytest.raises(HostNotAllowed, match=message):
+        await resolve_db_host(host, settings())
+
+
+async def test_connection_test_never_crashes(monkeypatch):
+    async def boom(*args, **kwargs):
+        raise RuntimeError("something unexpected")
+
+    monkeypatch.setattr("app.datasources.connectors.resolve_db_host", boom)
+    res = await api.run_test(DataSource(kind="postgres", host="h", port=5432, database="d",
+                                        username="u", ssl_mode="prefer", timeout_sec=5))
+    assert res.ok is False and "something unexpected" in res.error
+
+
 def test_password_never_returned():
     src = DataSource(id=1, name="x", kind="postgres", host="h", port=1, database="d",
                      username="u", password_encrypted=encrypt("s3cret"), ssl_mode="prefer",

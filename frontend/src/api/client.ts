@@ -30,16 +30,22 @@ function noteStatus(res: Response, path: string) {
 }
 
 async function errorMessage(res: Response): Promise<string> {
-  // The dev proxy answers 500/502/504 with no JSON body when the API container is down.
-  if (res.status >= 500 && !res.headers.get("content-type")?.includes("json")) return API_DOWN;
-  try {
-    const body = await res.json();
-    const d = body?.detail;
-    if (typeof d === "string") return d;
-    if (Array.isArray(d)) return d.map((e) => e.msg ?? JSON.stringify(e)).join("; ");
-  } catch {
-    /* fall through */
+  const text = await res.text().catch(() => "");
+  if (res.headers.get("content-type")?.includes("json")) {
+    try {
+      const d = JSON.parse(text)?.detail;
+      if (typeof d === "string") return d;
+      if (Array.isArray(d)) return d.map((e) => e.msg ?? JSON.stringify(e)).join("; ");
+    } catch {
+      /* fall through */
+    }
   }
+  // The API itself answered with an error page: it's running, something failed inside it.
+  if (res.status === 500 && text.trim() === "Internal Server Error") {
+    return "Something went wrong on the server. Details are in the api logs.";
+  }
+  // The dev proxy / web server answers 500/502/503/504 without a JSON body when the API is down.
+  if (res.status >= 500) return API_DOWN;
   return `${res.status} ${res.statusText}`;
 }
 

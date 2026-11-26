@@ -52,6 +52,7 @@ app.add_middleware(
 )
 
 UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
+log = structlog.get_logger()
 
 
 @app.middleware("http")
@@ -67,6 +68,18 @@ async def same_origin_writes(request: Request, call_next):
 def allowed_origins() -> set[str]:
     s = get_settings()
     return {o.strip().rstrip("/") for o in s.frontend_origin.split(",") if o.strip()}
+
+
+@app.exception_handler(Exception)
+async def unexpected_error(request: Request, exc: Exception) -> JSONResponse:
+    """A bug still answers in JSON (the UI shows it), instead of a bare "Internal Server Error"
+    that the UI can't tell apart from the API being down."""
+    log.error("unhandled_error", path=request.url.path,
+              error=f"{type(exc).__name__}: {exc}"[:500], exc_info=exc)
+    return JSONResponse(
+        {"detail": "Something went wrong on the server: "
+                   f"{type(exc).__name__}. Details are in the api logs."},
+        status_code=500)
 
 
 app.include_router(api_router)
