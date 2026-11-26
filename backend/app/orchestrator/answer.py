@@ -420,7 +420,7 @@ class Streamed:
 
 async def stream_completion(
     chat: ChatTarget, prompt: list[dict], out: Streamed, start: float, *,
-    temperature: float, max_tokens: int, emit: bool = True,
+    temperature: float, max_tokens: int | None, emit: bool = True,
 ) -> AsyncIterator[str]:
     """Streams model tokens as SSE `token` events, collecting the text into `out`."""
     try:
@@ -483,7 +483,7 @@ async def chat_reply(messages: list[dict], sites: list[Site], *, chat: ChatTarge
 
 async def catalog_reply(
     messages: list[dict], question: str, catalog: list[Candidate], system: str, *,
-    chat: ChatTarget, start: float, intent: str, max_tokens: int,
+    chat: ChatTarget, start: float, intent: str, max_tokens: int | None,
     done_extra: dict | None = None,
 ) -> AsyncIterator[str]:
     """Answers from the site catalog (overview questions, or explaining an empty search)."""
@@ -521,7 +521,7 @@ async def answer_stream(
     embedder: EmbedClient | None,
     reranker: RerankClient | None,
     live: LiveVerifier | None = None,
-    max_tokens: int = 1024,
+    max_tokens: int | None = None,  # None = no limit (null to vLLM)
 ) -> AsyncIterator[str]:
     start = time.perf_counter()
     question = messages[-1]["content"]

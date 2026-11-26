@@ -25,7 +25,7 @@ class AskRequest(ChatRequest):
 
     messages: list[ChatMessage] = Field(min_length=1, max_length=200)
     site_ids: list[int] | None = Field(None, max_length=200)  # None/empty = all enabled sites
-    max_tokens: int = Field(1024, ge=1, le=4096)
+    max_tokens: int | None = Field(None, ge=1, le=4096)  # None = no limit (null to vLLM)
 
 
 @router.post("/ask")

@@ -38,8 +38,9 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     messages: list[ChatMessage] = Field(min_length=1, max_length=200)
     temperature: float = Field(0.7, ge=0, le=2)
-    # 1024 cut off long answers (e.g. essays); 2048 still leaves ample room in the 16k context.
-    max_tokens: int = Field(2048, ge=1, le=8192)
+    # None = no limit: sent to vLLM as null, so the model writes until it finishes or the context
+    # window (CHAT_MAX_LEN) is full. (vLLM rejects -1.) A client may still ask for a cap.
+    max_tokens: int | None = Field(None, ge=1, le=8192)
 
     @model_validator(mode="after")
     def last_is_user(self) -> "ChatRequest":
