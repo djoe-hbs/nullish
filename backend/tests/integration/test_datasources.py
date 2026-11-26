@@ -140,6 +140,28 @@ async def test_question_answered_from_query_results(sessions, shop):  # noqa: F8
     assert [(lg.kind, lg.status, lg.rows) for lg in logs] == [("read", "ok", 1)]
 
 
+async def test_structure_questions_are_answered_from_the_schema(sessions, shop):  # noqa: F811
+    """"What tables are there?" needs no query. The answer writer used to see only query
+    results, so with none it concluded the database had no tables."""
+    src, _, _ = shop
+    async with sessions() as db:
+        await db.execute(update(DsSchemaItem).where(DsSchemaItem.source_id == src.id,
+                                                    DsSchemaItem.table_name == "staff_secrets")
+                         .values(hidden=True))
+        await db.commit()
+    events, sent = await ask(sessions, src, "What are the tables in the database?",
+                             {"change": False}, [{"action": "answer"}],
+                             answer="It has customers, orders, order_items and products.")
+    assert queries(events) == [] and events[-1][0] == "done"
+    writer = sent[-1]
+    assert writer.get("stream")
+    context = writer["messages"][1]["content"]
+    for table in ("customers", "orders", "order_items", "products"):
+        assert f"Table {table}" in context
+    assert "staff_secrets" not in context  # hidden stays hidden
+    assert "structure" in writer["messages"][0]["content"]
+
+
 async def test_sql_error_goes_back_to_the_model(sessions, shop):  # noqa: F811
     src, _, _ = shop
     events, sent = await ask(sessions, src, "Total revenue?", {"change": False}, [
