@@ -1,5 +1,5 @@
 [project]
-name = "nullish"
+name = "smish"
 version = "0.1.0"
 description = "Grounded, freshness-verified chatbot over configured websites"
 requires-python = ">=3.12"

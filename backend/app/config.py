@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     session_days: int = 7
     cookie_secure: bool = False  # True in production (HTTPS): cookie never sent over plain HTTP
 
-    crawler_user_agent: str = "NullishBot/1.0"
+    crawler_user_agent: str = "SmishBot/1.0"
     max_live_fetches_per_question: int = 8
     live_fetch_timeout_sec: float = 4.0
 

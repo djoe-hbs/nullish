@@ -13,7 +13,7 @@ export type Health = {
   worker_last_check?: { checked_at: string } | null;
 };
 
-const API_DOWN = "The Nullish API isn't reachable. Is the api container running?";
+const API_DOWN = "The Smish API isn't reachable. Is the api container running?";
 
 export class ApiError extends Error {
   constructor(message: string, readonly status = 0) {

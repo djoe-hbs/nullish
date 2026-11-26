@@ -22,7 +22,7 @@ identical in both, so pages indexed during testing stay valid after you scale up
 | **prod** | `bash start_vllm.sh prod` | `Qwen/Qwen3-30B-A3B-Instruct-2507-FP8`, 32k context | **48 GB** (RTX A6000 / L40S / A40) | Real answer quality, once everything works |
 
 The models are served under fixed names (`nullish-chat`, `nullish-embed`, `nullish-rerank`), so
-**scaling up needs no change on the Nullish PC**:
+**scaling up needs no change on the Smish PC**:
 1. `bash start_vllm.sh stop`
 2. Rent or switch to the 48 GB instance.
 3. Run `bash start_vllm.sh prod` and reconnect the tunnel.
@@ -52,7 +52,7 @@ Notes:
 
 1. On the instance:
    ```bash
-   export VLLM_API_KEY=<same as GPU_API_KEY in Nullish .env>
+   export VLLM_API_KEY=<same as GPU_API_KEY in Smish .env>
    bash start_vllm.sh test   # copy it over with scp, or paste it. Starts embed, then rerank, then chat
    ```
 2. On this PC, in a new terminal, leave this running:

@@ -4,6 +4,7 @@ import { motion } from "motion/react";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import type React from "react";
+import { setChatTitle } from "../pageTitle";
 import { Bubble, type Mode, type Msg } from "../components/Message";
 import {
   fetchHealth,
@@ -142,6 +143,9 @@ export default function Chat() {
   const [active, setActive] = useState(() => saved[0]?.id ?? newChatId());
   const [messages, setMessages] = useState<Msg[]>(saved[0]?.messages ?? []);
   const [saveError, setSaveError] = useState(false);
+  // Tell the app which conversation is open so the browser tab can show its title.
+  const openTitle = saved.find(c => c.id === active)?.title ?? "";
+  useEffect(() => { setChatTitle(openTitle); }, [openTitle]);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [filter, setFilter] = useState("");
   const historyButton = useRef<HTMLButtonElement>(null);
@@ -469,7 +473,7 @@ export default function Chat() {
           />
           <span className="truncate">
             {apiDown
-              ? "Nullish API unreachable"
+              ? "Smish API unreachable"
               : health === undefined
                 ? "Checking model…"
                 : online

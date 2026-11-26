@@ -1,4 +1,4 @@
-# Nullish — local stack (runs on this PC).
+# Smish — local stack (runs on this PC).
 # All models (chat/router, embeddings, reranker) run on a rented Vast.ai GPU, reached through one
 # SSH tunnel on the host (gpu/tunnel.ps1 -> localhost:8001/8002/8003), which containers see as
 # host.docker.internal. Crawling, extraction and chunking run here even while the GPU is off;

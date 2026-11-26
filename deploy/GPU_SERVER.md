@@ -1,8 +1,8 @@
-# Nullish GPU server: setup guide for an AI agent
+# Smish GPU server: setup guide for an AI agent
 
-You are setting up the **model server** for Nullish on a rented GPU machine (usually a Vast.ai
+You are setting up the **model server** for Smish on a rented GPU machine (usually a Vast.ai
 instance). When you are done, three model servers run on this machine, reachable only from
-localhost. The Nullish VPS reaches them through an SSH tunnel it opens itself.
+localhost. The Smish VPS reaches them through an SSH tunnel it opens itself.
 
 | Port (127.0.0.1 only) | Served name | Model | Used for |
 |---|---|---|---|
@@ -15,7 +15,7 @@ on the VPS.
 
 Some providers put their own operating guide on the machine (for example
 `/etc/vast-agents-guide.md`). Follow it for platform matters such as storage and networking. This
-document defines **what** to run for Nullish.
+document defines **what** to run for Smish.
 
 ---
 
@@ -74,19 +74,19 @@ If something listens there:
 ## 4. Install the start script and the secret
 
 ```bash
-mkdir -p /workspace/nullish /workspace/logs
+mkdir -p /workspace/smish /workspace/logs
 ```
 
-- **The script:** if you have the Nullish repository, copy `gpu/start_vllm.sh` to
-  `/workspace/nullish/start_vllm.sh`. Otherwise, write the script from the
+- **The script:** if you have the Smish repository, copy `gpu/start_vllm.sh` to
+  `/workspace/smish/start_vllm.sh`. Otherwise, write the script from the
   [Appendix](#appendix-start_vllmsh) to that path exactly.
 - **The secret:** write the API key to a root-only file. Replace the placeholder; don't echo it
   back.
 
   ```bash
   umask 077
-  printf 'VLLM_API_KEY=%s\n' '<VLLM_API_KEY from the operator>' > /workspace/nullish/vllm.env
-  chmod 600 /workspace/nullish/vllm.env
+  printf 'VLLM_API_KEY=%s\n' '<VLLM_API_KEY from the operator>' > /workspace/smish/vllm.env
+  chmod 600 /workspace/smish/vllm.env
   ```
 
 - Optional: if model downloads are rate-limited, add `HF_TOKEN=<token>` to the same file (from the
@@ -117,8 +117,8 @@ Run inside `tmux`, so the servers survive your SSH session ending:
 
 ```bash
 tmux kill-session -t nullish 2>/dev/null || true
-tmux new -d -s nullish "bash -c 'set -a; . /workspace/nullish/vllm.env; set +a; \
-  exec bash /workspace/nullish/start_vllm.sh ${PROFILE:-test} 2>&1 | tee /workspace/logs/start.log'"
+tmux new -d -s nullish "bash -c 'set -a; . /workspace/smish/vllm.env; set +a; \
+  exec bash /workspace/smish/start_vllm.sh ${PROFILE:-test} 2>&1 | tee /workspace/logs/start.log'"
 ```
 
 The script:
@@ -140,7 +140,7 @@ named log (`/workspace/logs/embed.log`, `rerank.log` or `chat.log`) and go to
 ## 7. Verify (all must pass)
 
 ```bash
-set -a; . /workspace/nullish/vllm.env; set +a
+set -a; . /workspace/smish/vllm.env; set +a
 H="Authorization: Bearer $VLLM_API_KEY"
 
 # 1) liveness: three times 200
@@ -190,8 +190,8 @@ Stopping and starting a rented instance kills the servers. If the platform suppo
 script (Vast.ai: the template's **On-start Script** field), the operator should set it to:
 
 ```bash
-tmux new -d -s nullish "bash -c 'set -a; . /workspace/nullish/vllm.env; set +a; \
-  exec bash /workspace/nullish/start_vllm.sh test 2>&1 | tee /workspace/logs/start.log'"
+tmux new -d -s nullish "bash -c 'set -a; . /workspace/smish/vllm.env; set +a; \
+  exec bash /workspace/smish/start_vllm.sh test 2>&1 | tee /workspace/logs/start.log'"
 ```
 
 Use `prod` instead of `test` if that's the chosen profile. You usually can't set this field from
@@ -226,7 +226,7 @@ Report these, and **never** include the API key:
 
 | Task | Command |
 |---|---|
-| Stop | `bash /workspace/nullish/start_vllm.sh stop; tmux kill-session -t nullish` |
+| Stop | `bash /workspace/smish/start_vllm.sh stop; tmux kill-session -t nullish` |
 | Switch profile | Stop, then step 6 with the other profile. Nothing changes on the VPS. |
 | Logs | `/workspace/logs/{start,chat,embed,rerank}.log` |
 
@@ -234,7 +234,7 @@ Report these, and **never** include the API key:
 
 ## Appendix: start_vllm.sh
 
-Authoritative copy: `gpu/start_vllm.sh` in the Nullish repository. Use this only if you don't
+Authoritative copy: `gpu/start_vllm.sh` in the Smish repository. Use this only if you don't
 have the repository.
 
 ```bash

@@ -34,7 +34,7 @@ export default function Login() {
       <form className="login-card" onSubmit={submit}>
         <div className="login-brand">
           <span className="brand-tile"><BookOpen /></span>
-          <span className="wordmark">Nullish</span>
+          <span className="wordmark">Smish</span>
         </div>
         <h1>Welcome back</h1>
         <p className="login-sub">Sign in to ask your sites.</p>

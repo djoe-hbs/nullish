@@ -1,6 +1,6 @@
 """Decides what a message needs before anything is searched (the plan's "router" role).
 
-  chat           casual talk / questions about Nullish itself: answered conversationally
+  chat           casual talk / questions about Smish itself: answered conversationally
   sites_overview questions about the configured websites as a whole ("which is most
                  interesting?", "what sites do you have?"): answered from the site catalog
   search         needs facts from the websites' pages: full search + live verification
@@ -22,14 +22,14 @@ log = structlog.get_logger()
 
 INTENTS = ("chat", "sites_overview", "search")
 
-ROUTER_PROMPT = """You route messages for Nullish, an assistant that answers questions from \
+ROUTER_PROMPT = """You route messages for Smish, an assistant that answers questions from \
 these websites:
 {sites}
 
 Read the conversation and decide what the user's LATEST message needs. Reply with JSON only:
 {{"intent": "chat" | "sites_overview" | "search", "query": "<standalone search query, or empty>"}}
 
-- "chat": greetings, thanks, small talk, opinions or questions about you (Nullish), general \
+- "chat": greetings, thanks, small talk, opinions or questions about you (Smish), general \
 chit-chat. Needs no website content.
 - "sites_overview": questions about the set of websites as a whole: which sites there are, what \
 each one is about, which is most interesting/useful/popular, how they differ in general.
