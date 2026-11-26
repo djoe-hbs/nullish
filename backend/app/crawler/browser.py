@@ -7,17 +7,74 @@ Requests are intercepted so the SSRF guard also applies to everything the page l
 import asyncio
 import re
 
+import structlog
+
 from app.crawler.ssrf import UnsafeURLError, assert_public_url
 
-SKIP_RESOURCES = {"image", "media", "font", "stylesheet", "texttrack", "eventsource", "websocket",
-                  "manifest"}
+log = structlog.get_logger()
+
+# Stylesheets are NOT skipped: app bundles (Vite, Next, webpack) load CSS together with route
+# code, and a blocked stylesheet makes the import fail, so the page stays on its loading screen.
+SKIP_RESOURCES = {"image", "media", "font", "texttrack", "eventsource", "websocket", "manifest"}
 TRACKERS = re.compile(
     r"google-analytics\.com|googletagmanager\.com|doubleclick\.net|facebook\.net|hotjar\.com|"
     r"clarity\.ms|segment\.(io|com)|mixpanel\.com|intercom(cdn)?\.(io|com)|crisp\.chat|"
     r"tawk\.to|hubspot\.com|hs-scripts\.com|linkedin\.com/(px|li)|snap\.licdn\.com|"
     r"youtube\.com/embed|recaptcha|gstatic\.com/recaptcha"
 )
-SETTLE_MS = 2500  # max extra wait for client-side data fetches after "load"
+LOAD_MS = 5000  # max wait for the "load" event after the DOM is ready
+SETTLE_MAX_MS = 9000  # max wait for the real content to replace a loading screen
+QUIET_MS = 800  # content unchanged this long = finished rendering
+
+# Runs inside the page. Resolves once the visible text and links stop changing, no loading
+# screen is covering the page and there's real content; scrolls down so lazy sections load.
+WAIT_FOR_CONTENT = """
+async ({maxMs, quietMs}) => {
+  const start = performance.now();
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const LOADER = '[aria-busy="true"],[class*="preload" i],[id*="preload" i],[class*="loader" i],' +
+    '[id*="loader" i],[class*="spinner" i],[id*="spinner" i],[class*="loading" i],' +
+    '[id*="loading" i],[class*="splash" i],[id*="splash" i],[class*="skeleton" i]';
+  const covering = () => {
+    const area = innerWidth * innerHeight;
+    for (const el of document.querySelectorAll(LOADER)) {
+      const r = el.getBoundingClientRect();
+      if (r.width * r.height < area * 0.25) continue;
+      const cs = getComputedStyle(el);
+      const shown = cs.display !== 'none' && cs.visibility !== 'hidden';
+      if (shown && parseFloat(cs.opacity) > 0.05) return true;
+    }
+    return false;
+  };
+  const snap = () =>
+    ((document.body && document.body.innerText) || '').length + ':' + document.links.length;
+  const settle = async (budget) => {
+    const until = Math.min(start + maxMs, performance.now() + budget);
+    let last = snap(), since = performance.now();
+    while (performance.now() < until) {
+      await sleep(200);
+      const now = snap();
+      if (now !== last) { last = now; since = performance.now(); continue; }
+      const [text, links] = now.split(':').map(Number);
+      const real = text >= 200 || links > 2;
+      if (performance.now() - since >= quietMs && real && !covering()) return true;
+    }
+    return false;
+  };
+  const ready = await settle(maxMs);
+  // Lazy sections (infinite lists, "load on scroll") only appear once scrolled into view.
+  for (let i = 0; i < 12 && performance.now() - start < maxMs; i++) {
+    const before = document.documentElement.scrollHeight;
+    scrollBy(0, innerHeight);
+    await sleep(150);
+    if (innerHeight + scrollY >= document.documentElement.scrollHeight - 2 &&
+        document.documentElement.scrollHeight === before) break;
+  }
+  scrollTo(0, 0);
+  await settle(1500);
+  return ready;
+}
+"""
 
 
 class BrowserUnavailable(RuntimeError):
@@ -50,7 +107,8 @@ class Browser:
     async def render(self, url: str, *, timeout_ms: int | None = None) -> tuple[str, int, str]:
         """Returns (rendered HTML, HTTP status, final URL)."""
         browser = await self._ensure()
-        ctx = await browser.new_context(user_agent=self.user_agent, java_script_enabled=True)
+        ctx = await browser.new_context(user_agent=self.user_agent, java_script_enabled=True,
+                                        viewport={"width": 1280, "height": 900})
         try:
             page = await ctx.new_page()
 
@@ -66,13 +124,24 @@ class Browser:
                 await route.continue_()
 
             await page.route("**/*", guard)
-            resp = await page.goto(url, wait_until="load", timeout=timeout_ms or self.timeout_ms)
-            # Let client-side data fetches finish, but don't wait for chatty widgets/analytics
-            # that never go idle.
+            timeout = timeout_ms or self.timeout_ms
+            resp = await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+            # "load" can hang on a slow third-party resource; the DOM is usable without it.
             try:
-                await page.wait_for_load_state("networkidle", timeout=SETTLE_MS)
-            except Exception:  # noqa: BLE001 - settle timeout is fine, the DOM is usable
+                await page.wait_for_load_state("load", timeout=min(LOAD_MS, timeout // 3))
+            except Exception:  # noqa: BLE001
                 pass
+            # Wait for the real content (loading screens, client-side data fetches, lazy
+            # sections) rather than a fixed delay.
+            try:
+                ready = await page.evaluate(
+                    WAIT_FOR_CONTENT,
+                    {"maxMs": min(SETTLE_MAX_MS, timeout // 2), "quietMs": QUIET_MS},
+                )
+                if not ready:
+                    log.info("render_not_settled", url=url)
+            except Exception as exc:  # noqa: BLE001 - e.g. the page navigated itself; use what's there
+                log.info("render_wait_failed", url=url, error=str(exc))
             return await page.content(), (resp.status if resp else 200), page.url
         finally:
             await ctx.close()
