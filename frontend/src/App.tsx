@@ -38,10 +38,10 @@ export default function App() {
 
   const [tab, setTab] = useState<Tab>(tabFromHash);
 
+  // Light by default; the dark theme is used only after the user switches to it.
   const [dark, setDark] = useState(() => {
-    const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-    try { return (localStorage.getItem("nullish.theme") ?? (prefersDark ? "dark" : "light")) === "dark"; }
-    catch { return prefersDark; }
+    try { return localStorage.getItem("nullish.theme") === "dark"; }
+    catch { return false; }
   });
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
