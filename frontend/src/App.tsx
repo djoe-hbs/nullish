@@ -6,6 +6,7 @@ import { ApiError, getMe, SIGNED_OUT_EVENT, type User } from "./api/client";
 import AccountMenu from "./components/AccountMenu";
 import Chat from "./pages/Chat";
 import Login from "./pages/Login";
+import { CHAT_TITLE_EVENT, getChatTitle } from "./pageTitle";
 import Sites from "./pages/Sites";
 import Status from "./pages/Status";
 
@@ -52,6 +53,20 @@ export default function App() {
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
+
+  const [chatTitle, setChatTitleState] = useState(getChatTitle);
+  useEffect(() => {
+    const sync = () => setChatTitleState(getChatTitle());
+    window.addEventListener(CHAT_TITLE_EVENT, sync);
+    return () => window.removeEventListener(CHAT_TITLE_EVENT, sync);
+  }, []);
+  const signedIn = Boolean(me.data);
+  useEffect(() => {
+    const page = !signedIn ? "Sign in"
+      : tab === "chat" ? (chatTitle || "New chat")
+      : tab === "sites" ? "Site library" : "Status";
+    document.title = `${page} · Smish`;
+  }, [signedIn, tab, chatTitle]);
 
   const tabs = [
     { id: "chat", label: "Chat", icon: MessageCircle },
