@@ -62,13 +62,13 @@ export default function App() {
   if (me.isLoading) return <div className="shell" aria-busy="true" />;
   if (me.isError)
     return <div className="login-screen"><p className="login-error">
-      The Nullish API isn't reachable right now. Please try again in a moment.</p></div>;
+      The Smish API isn't reachable right now. Please try again in a moment.</p></div>;
   if (!me.data) return <MotionConfig reducedMotion="user"><Login /></MotionConfig>;
 
   return <MotionConfig reducedMotion="user">
     <div className="shell">
       <header className="mast">
-        <a href="#chat" className="wordmark" aria-label="Nullish home"><span className="brand-tile"><BookOpen /></span>Nullish</a>
+        <a href="#chat" className="wordmark" aria-label="Smish home"><span className="brand-tile"><BookOpen /></span>Smish</a>
         <nav aria-label="Main navigation" className="nav-dock">
           {tabs.map(({id, label, icon: Icon}) => <a href={`#${id}`} key={id}
             aria-current={tab === id ? "page" : undefined}>

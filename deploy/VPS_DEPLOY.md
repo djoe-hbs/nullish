@@ -1,6 +1,6 @@
-# Nullish VPS: deployment guide for an AI agent
+# Smish VPS: deployment guide for an AI agent
 
-You are deploying **Nullish** (web app + API + background worker + database) on a Linux VPS, with
+You are deploying **Smish** (web app + API + background worker + database) on a Linux VPS, with
 HTTPS on the operator's domain. The AI models do **not** run here. They run on a separate GPU
 server (set up with `deploy/GPU_SERVER.md`), which this VPS reaches through an SSH tunnel it opens
 itself.
@@ -22,8 +22,8 @@ private network.
 
 | Name | What it is | If missing |
 |---|---|---|
-| Repository | Git URL (with access) or an archive of the Nullish code | Ask. |
-| `DOMAIN` | e.g. `nullish.example.com`. Its DNS **A record must point to this VPS's public IP** before step 7. | Ask. Without a domain, HTTPS and secure login cookies won't work. |
+| Repository | Git URL (with access) or an archive of the Smish code | Ask. |
+| `DOMAIN` | e.g. `smish.example.com`. Its DNS **A record must point to this VPS's public IP** before step 7. | Ask. Without a domain, HTTPS and secure login cookies won't work. |
 | `ADMIN_EMAIL`, `ADMIN_PASSWORD` | First admin account (created on the very first start only) | Ask. Never invent them. |
 | `GPU_API_KEY` | Shared secret; must equal `VLLM_API_KEY` on the GPU server | Ask, or generate it in step 5 and give it to the operator for the GPU server. |
 | `GPU_HOST`, `GPU_SSH_PORT` | Public SSH address of the GPU server (reported by its setup agent) | Ask. You can finish everything else first; `gpu_available` stays false until then. |
@@ -90,13 +90,13 @@ Expected: Docker ≥ 24, Compose ≥ v2.20, and ufw active with 22/80/443 allowe
 ## 4. Get the code
 
 ```bash
-sudo mkdir -p /opt/nullish && sudo chown "$USER" /opt/nullish
-git clone <repository URL> /opt/nullish     # or unpack the archive into /opt/nullish
-cd /opt/nullish
+sudo mkdir -p /opt/smish && sudo chown "$USER" /opt/smish
+git clone <repository URL> /opt/smish     # or unpack the archive into /opt/smish
+cd /opt/smish
 ls docker-compose.prod.yml deploy/Caddyfile deploy/.env.production.example
 ```
 
-All three files must exist. **All following commands run in `/opt/nullish`.**
+All three files must exist. **All following commands run in `/opt/smish`.**
 
 ## 5. Create the GPU tunnel key and the secrets
 
@@ -105,7 +105,7 @@ restricted to port forwarding on the GPU side.
 
 ```bash
 mkdir -p deploy/secrets
-ssh-keygen -t ed25519 -N "" -C nullish-vps -f deploy/secrets/gpu_ssh_key
+ssh-keygen -t ed25519 -N "" -C smish-vps -f deploy/secrets/gpu_ssh_key
 chmod 600 deploy/secrets/gpu_ssh_key
 cat deploy/secrets/gpu_ssh_key.pub
 ```
@@ -141,7 +141,7 @@ Edit `.env` and replace **every** `<…>` placeholder:
 | `DATABASE_URL` | `postgresql+asyncpg://nullish:<POSTGRES_PASSWORD>@postgres:5432/nullish`, with the same password |
 | `GPU_HOST`, `GPU_SSH_PORT` | from the GPU server report |
 | `GPU_API_KEY` | the shared secret |
-| `CRAWLER_USER_AGENT` | `NullishBot/1.0 (+https://DOMAIN)` |
+| `CRAWLER_USER_AGENT` | `SmishBot/1.0 (+https://DOMAIN)` |
 
 Leave the model settings (`CHAT_BASE_URL=http://gpu-tunnel:8001/v1`, …) as they are.
 
@@ -194,15 +194,15 @@ curl -s -o /dev/null -w "%{http_code}\n" $D/api/v1/sites            # 401
 
 # 5) the admin can sign in (read the password from .env, don't print it)
 set -a; . ./.env; set +a
-curl -s -c /tmp/nullish.cookies -H 'content-type: application/json' -H "origin: $FRONTEND_ORIGIN" \
+curl -s -c /tmp/smish.cookies -H 'content-type: application/json' -H "origin: $FRONTEND_ORIGIN" \
   -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\"}" $D/api/v1/auth/login
 #    {"id":1,"email":"…","role":"admin"}
-curl -s -b /tmp/nullish.cookies -o /dev/null -w "%{http_code}\n" $D/api/v1/sites   # 200
+curl -s -b /tmp/smish.cookies -o /dev/null -w "%{http_code}\n" $D/api/v1/sites   # 200
 
 # 6) answers stream (needs the GPU): token events arrive one by one
-curl -sN -b /tmp/nullish.cookies -H 'content-type: application/json' -H "origin: $FRONTEND_ORIGIN" \
+curl -sN -b /tmp/smish.cookies -H 'content-type: application/json' -H "origin: $FRONTEND_ORIGIN" \
   -d '{"messages":[{"role":"user","content":"Hi"}]}' $D/api/v1/ask | head -12
-rm -f /tmp/nullish.cookies
+rm -f /tmp/smish.cookies
 
 # 7) only 22, 80, 443 are listening publicly
 sudo ss -ltnp | grep -vE '127\.0\.0\.|::1' | grep -E ':(22|80|443|5432|6379|8000|800[1-3])\b'
@@ -218,7 +218,7 @@ docker compose -f docker-compose.prod.yml logs --tail 20 gpu-tunnel
 |---|---|
 | `Permission denied (publickey)` | The GPU server hasn't authorised `deploy/secrets/gpu_ssh_key.pub` yet. |
 | `Connection refused` / `timed out` | Wrong `GPU_HOST` or `GPU_SSH_PORT`, or the GPU machine is stopped. |
-| `REMOTE HOST IDENTIFICATION HAS CHANGED` | The GPU machine was re-created at the same address. Run `docker compose -f docker-compose.prod.yml stop gpu-tunnel && docker volume rm nullish_tunnel_known_hosts && docker compose -f docker-compose.prod.yml up -d gpu-tunnel`. |
+| `REMOTE HOST IDENTIFICATION HAS CHANGED` | The GPU machine was re-created at the same address. Run `docker compose -f docker-compose.prod.yml stop gpu-tunnel && docker volume rm smish_tunnel_known_hosts && docker compose -f docker-compose.prod.yml up -d gpu-tunnel`. |
 | No errors, but health shows `chat … HTTP 401` | `GPU_API_KEY` ≠ the GPU server's `VLLM_API_KEY`. |
 
 ## 9. Scheduled database backups
@@ -226,24 +226,24 @@ docker compose -f docker-compose.prod.yml logs --tail 20 gpu-tunnel
 Daily dump, keeping 14 days:
 
 ```bash
-sudo mkdir -p /var/backups/nullish
-sudo tee /etc/cron.daily/nullish-backup >/dev/null <<'EOF'
+sudo mkdir -p /var/backups/smish
+sudo tee /etc/cron.daily/smish-backup >/dev/null <<'EOF'
 #!/bin/sh
 set -e
-cd /opt/nullish
+cd /opt/smish
 docker compose -f docker-compose.prod.yml exec -T postgres \
-  pg_dump -U nullish -Fc nullish > /var/backups/nullish/nullish-$(date +%F).dump
-find /var/backups/nullish -name 'nullish-*.dump' -mtime +14 -delete
+  pg_dump -U nullish -Fc nullish > /var/backups/smish/smish-$(date +%F).dump
+find /var/backups/smish -name 'nullish-*.dump' -mtime +14 -delete
 EOF
-sudo chmod 755 /etc/cron.daily/nullish-backup
-sudo /etc/cron.daily/nullish-backup && ls -lh /var/backups/nullish
+sudo chmod 755 /etc/cron.daily/smish-backup
+sudo /etc/cron.daily/smish-backup && ls -lh /var/backups/smish
 ```
 
 To restore a dump (it replaces the current data, so only on the operator's request):
 
 ```bash
 docker compose -f docker-compose.prod.yml exec -T postgres \
-  pg_restore -U nullish -d nullish --clean --if-exists < /var/backups/nullish/<file>.dump
+  pg_restore -U nullish -d nullish --clean --if-exists < /var/backups/smish/<file>.dump
 ```
 
 Also keep `.env` and `deploy/secrets/` backed up somewhere safe and off the server: they aren't
@@ -262,7 +262,7 @@ Report these; **never** include secrets:
 
 ## 10. Operations
 
-| Task | Command (in `/opt/nullish`) |
+| Task | Command (in `/opt/smish`) |
 |---|---|
 | Status | `docker compose -f docker-compose.prod.yml ps` |
 | Logs | `docker compose -f docker-compose.prod.yml logs -f --tail 100 api worker` |

@@ -1,4 +1,4 @@
-# Nullish — production stack for the VPS.  Full instructions: deploy/VPS_DEPLOY.md
+# Smish — production stack for the VPS.  Full instructions: deploy/VPS_DEPLOY.md
 #
 #   internet ──443/80──> web (Caddy: HTTPS, built frontend, /api -> api)
 #                          api ── postgres, redis

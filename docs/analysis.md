@@ -1,4 +1,4 @@
-# Nullish: design review for the local-app + Vast.ai GPU deployment
+# Smish: design review for the local-app + Vast.ai GPU deployment
 
 **Deployment.** This Windows PC runs the frontend, API, worker, Postgres and Redis, all in Docker Desktop. A rented Vast.ai GPU, switched on and off to save cost, runs **all models** as three vLLM servers: chat/router, embeddings and reranker. This PC reaches them through one SSH tunnel.
 

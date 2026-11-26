@@ -1,8 +1,8 @@
-# Nullish
+# Smish
 
 A self-hosted chatbot that answers only from websites you configure, always checks content against the live site before using it, and runs on open-source models.
 
-- Design: [Nullish-Plan.md](Nullish-Plan.md)
+- Design: [Smish-Plan.md](Smish-Plan.md)
 - Deployment review: [docs/analysis.md](docs/analysis.md)
 - GPU setup (local development): [gpu/README.md](gpu/README.md)
 - **Production deployment** (written for AI agents to follow):

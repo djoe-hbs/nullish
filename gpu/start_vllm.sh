@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # Run ON the Vast.ai instance. Starts three OpenAI-compatible vLLM servers, all bound to 127.0.0.1
-# (reached from the Nullish PC only through the SSH tunnel, gpu/tunnel.ps1):
+# (reached from the Smish PC only through the SSH tunnel, gpu/tunnel.ps1):
 #
 #   :8000  chat / router   /v1/chat/completions   served as "nullish-chat"
 #   :8010  embeddings      /v1/embeddings         served as "nullish-embed"
 #   :8020  reranker        /v1/rerank             served as "nullish-rerank"
 #
-# The served names never change, so switching test <-> prod needs NO change on the Nullish PC.
+# The served names never change, so switching test <-> prod needs NO change on the Smish PC.
 #
 # Usage:
-#   export VLLM_API_KEY=...        # same value as GPU_API_KEY in Nullish .env
+#   export VLLM_API_KEY=...        # same value as GPU_API_KEY in Smish .env
 #   bash start_vllm.sh test        # small chat model, cheap 16-24 GB GPU (flow testing)
 #   bash start_vllm.sh prod        # full-size chat model, 48 GB GPU
 #   bash start_vllm.sh stop

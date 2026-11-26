@@ -1,21 +1,21 @@
-# Nullish — Project Plan
+# Smish — Project Plan
 
-> **Nullish** is a self-hosted chatbot that answers questions **only from websites you configure**, always using **fresh** content, powered by **open-source LLMs** on endpoints you control.
+> **Smish** is a self-hosted chatbot that answers questions **only from websites you configure**, always using **fresh** content, powered by **open-source LLMs** on endpoints you control.
 
 ---
 
 ## 1. Overview
 
-You log in to the Nullish dashboard, add a set of websites, point Nullish at your LLM endpoints, and chat. Every answer is:
+You log in to the Smish dashboard, add a set of websites, point Smish at your LLM endpoints, and chat. Every answer is:
 
 - **Grounded**: comes only from the configured sites (and, optionally, your databases).
 - **Fresh**: pages are re-verified against the live site before they are used in an answer.
 - **Cited**: every claim links to the exact page it came from, with a "fetched at" timestamp.
-- **Honest**: if the sites don't contain the answer, Nullish says so instead of guessing.
+- **Honest**: if the sites don't contain the answer, Smish says so instead of guessing.
 
 ### Example questions
 
-| Type | Example | What Nullish does |
+| Type | Example | What Smish does |
 |---|---|---|
 | Cross-site lookup | "Which site has a 50% off sale on shoes?" | Searches all configured sites, verifies matches live, lists the sites with evidence |
 | Site-scoped question | "What is the return policy on site Y?" | Searches only site Y, live-fetches the relevant pages, answers |
@@ -102,9 +102,9 @@ You log in to the Nullish dashboard, add a set of websites, point Nullish at you
 
 ---
 
-## 4. The freshness strategy (core of Nullish)
+## 4. The freshness strategy (core of Smish)
 
-The requirement is that **old data must never be answered**. A pure index goes stale, and scraping everything live per question is too slow. Nullish uses **index to find, live to verify**:
+The requirement is that **old data must never be answered**. A pure index goes stale, and scraping everything live per question is too slow. Smish uses **index to find, live to verify**:
 
 > The index is only used to find *which pages* are likely relevant. Before any page's content reaches the LLM, its freshness is checked against the live site.
 
@@ -266,7 +266,7 @@ sequenceDiagram
 
 ### 6.3 Answer prompt (sketch)
 ```
-You are Nullish. Answer ONLY using the numbered sources below.
+You are Smish. Answer ONLY using the numbered sources below.
 - Cite every factual sentence with [n].
 - If the sources don't contain the answer, say: "I couldn't find this on the configured sites."
 - Never use outside knowledge. Never invent URLs, prices, or dates.
@@ -302,7 +302,7 @@ Streaming shows status updates ("Checking 6 pages live… 2 updated") so the wai
 - **Tables & PDFs**: tables converted to markdown. Linked PDFs extracted (pypdf / pdfplumber) if in scope.
 - **Chunking**: heading-aware, ~400–800 tokens with ~15% overlap. Each chunk carries `site, url, title, heading_path, page_version`.
 - **Discovery**: sitemap.xml (and sitemap indexes) first, then in-scope link following up to the max depth.
-- **Politeness**: robots.txt, per-domain concurrency (default 2), crawl delay, an identifying User-Agent (`NullishBot/1.0 (+contact URL)`), exponential backoff on 429/5xx.
+- **Politeness**: robots.txt, per-domain concurrency (default 2), crawl delay, an identifying User-Agent (`SmishBot/1.0 (+contact URL)`), exponential backoff on 429/5xx.
 - **Canonicalization**: strip tracking params, respect `<link rel="canonical">`, dedupe by content hash.
 - **Change detection**: ETag / Last-Modified / content hash of the extracted text (§4).
 
@@ -466,7 +466,7 @@ event: done     data: {"message_id":123,"latency_ms":4210}
 ## 13. Project structure
 
 ```
-nullish/
+smish/
 ├── docker-compose.yml
 ├── .env.example
 ├── README.md
@@ -512,7 +512,7 @@ nullish/
   1. Ask "What is the price of X?" → answer A.
   2. Change the price on the test site.
   3. Ask again → the answer **must** reflect the new price with a new `fetched_at`.
-  4. Delete the page → Nullish must no longer cite it.
+  4. Delete the page → Smish must no longer cite it.
   5. Add a new page (not yet crawled) → the live discovery path must find it.
 - **Answer quality**: a golden set of 50–100 Q&A pairs per test site, scored with RAGAS (faithfulness, answer relevancy, context precision) plus a citation-accuracy check.
 - **"I don't know" tests**: questions whose answers aren't on any site must produce the refusal.
@@ -553,8 +553,8 @@ DATABASE_URL=postgresql+asyncpg://nullish:***@postgres:5432/nullish
 REDIS_URL=redis://redis:6379/0
 SECRET_KEY=change-me                 # JWT signing
 ENCRYPTION_KEY=change-me             # Fernet key for API keys / DSNs
-FRONTEND_ORIGIN=https://nullish.example.com
-CRAWLER_USER_AGENT=NullishBot/1.0 (+https://sols-ai.com)
+FRONTEND_ORIGIN=https://smish.example.com
+CRAWLER_USER_AGENT=SmishBot/1.0 (+https://sols-ai.com)
 MAX_LIVE_FETCHES_PER_QUESTION=8
 LIVE_FETCH_TIMEOUT_SEC=4
 ```
@@ -579,6 +579,6 @@ LIVE_FETCH_TIMEOUT_SEC=4
 1. **Single admin or multiple users?** v1 assumes one admin. Should teammates get their own logins and chats?
 2. **Login-protected target sites**: are any of the sites you'll configure behind a login? If so, phase 5 moves earlier.
 3. **Scale**: roughly how many sites, and how many pages per site? This decides crawl budgets and whether pgvector is enough (it is fine up to a few million chunks).
-4. **Internal tool or product?** If Nullish will be sold to SoLS AI clients, multi-tenancy (an `org_id` on every table) should be added in phase 1, not later.
+4. **Internal tool or product?** If Smish will be sold to SoLS AI clients, multi-tenancy (an `org_id` on every table) should be added in phase 1, not later.
 5. **Answer language**: English only, or also Tamil, Telugu, Hindi? The suggested Qwen models are multilingual, but this affects the prompts and evaluation.
 6. **Strictness when verification fails**: exclude unverified pages entirely, or answer with a warning label (current default)?

@@ -1,4 +1,4 @@
-# SITE_ADDRESS: your domain (e.g. nullish.example.com) -> automatic HTTPS.
+# SITE_ADDRESS: your domain (e.g. smish.example.com) -> automatic HTTPS.
 # Use ":80" only for a temporary HTTP-only test (login cookies then need COOKIE_SECURE=false).
 {$SITE_ADDRESS} {
 	encode zstd gzip

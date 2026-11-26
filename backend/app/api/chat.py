@@ -22,7 +22,7 @@ router = APIRouter(tags=["chat"])
 # to the grounded site-answering prompt (Phase 1); putting them here made the small model refuse
 # ordinary requests such as writing an essay.
 SYSTEM_PROMPT = (
-    "You are Nullish, a helpful assistant. Do what the user asks. If you don't know a specific "
+    "You are Smish, a helpful assistant. Do what the user asks. If you don't know a specific "
     "fact, say so rather than inventing it."
 )
 # ~6k tokens of history: well inside the 16k context of the small test model, leaving room for

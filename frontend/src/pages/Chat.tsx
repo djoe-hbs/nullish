@@ -469,7 +469,7 @@ export default function Chat() {
           />
           <span className="truncate">
             {apiDown
-              ? "Nullish API unreachable"
+              ? "Smish API unreachable"
               : health === undefined
                 ? "Checking model…"
                 : online

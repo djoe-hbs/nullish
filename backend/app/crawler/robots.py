@@ -6,7 +6,7 @@ from urllib.robotparser import RobotFileParser
 
 from app.crawler.fetcher import Fetcher
 
-UA_TOKEN = "NullishBot"
+UA_TOKEN = "SmishBot"
 
 
 @dataclass
