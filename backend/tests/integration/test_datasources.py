@@ -1,7 +1,7 @@
 """Database connections end to end, against the real test databases (compose profile "testdbs")
 with a scripted fake chat model (no GPU needed).
 
-  docker compose --profile testdbs up -d testdb-postgres testdb-mysql
+  docker compose --profile testdbs up -d testdb-postgres testdb-mysql testdb-mariadb
 
 Covers: questions answered from query results, self-correction after an SQL error, writes refused
 for plain questions, the three edit permissions (Never edit / Ask / Automatic), approval,
@@ -33,6 +33,7 @@ from tests.integration.test_crawl_and_answer import sessions  # noqa: F401 - fix
 DBS = {
     "postgres": dict(kind="postgres", host="testdb-postgres", port=5432, ssl_mode="prefer"),
     "mysql": dict(kind="mysql", host="testdb-mysql", port=3306, ssl_mode="disable"),
+    "mariadb": dict(kind="mysql", host="testdb-mariadb", port=3306, ssl_mode="disable"),
 }
 
 
@@ -66,7 +67,7 @@ def scripted_chat(route: dict, actions: list[dict], answer: str, sent: list[dict
                                       transport=httpx.MockTransport(handler))), "nullish-chat")
 
 
-@pytest_asyncio.fixture(params=["postgres", "mysql"])
+@pytest_asyncio.fixture(params=["postgres", "mysql", "mariadb"])
 async def shop(request, sessions):  # noqa: F811
     """A connected test database, plus a scratch table this test may change."""
     s = settings()

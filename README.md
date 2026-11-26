@@ -57,7 +57,7 @@ curl.exe "http://localhost:8000/api/v1/health?deep=true"
   Smish must never see, and add notes that explain what the data means. Every statement is
   logged (card → Query log). Details: [docs/db-connections-plan.md](docs/db-connections-plan.md).
   Sample databases for trying it out: `docker compose --profile testdbs up -d testdb-postgres
-  testdb-mysql` (host `testdb-postgres` / `testdb-mysql`, database/user/password `shop`; needs
+  testdb-mysql testdb-mariadb` (host `testdb-postgres` / `testdb-mysql` / `testdb-mariadb`, database/user/password `shop`; needs
   `ALLOW_PRIVATE_DB_HOSTS=true`, already set in the dev `.env`).
 - **Chat** tab, **Model only** mode: a plain chat with the model, not grounded in your sites.
 

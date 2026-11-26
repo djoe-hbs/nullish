@@ -276,10 +276,38 @@ class MySQLConn:
         except Exception as exc:  # noqa: BLE001
             raise DbError(f"couldn't connect: {_first_line(exc)}") from exc
         self = cls(conn, src.timeout_sec, src.database)
-        async with conn.cursor() as cur:
-            await cur.execute(f"SET SESSION max_execution_time = {int(src.timeout_sec * 1000)}")
-            await cur.execute(f"SET SESSION innodb_lock_wait_timeout = {max(1, src.timeout_sec)}")
+        try:
+            await self._session_limits(src.timeout_sec)
+        except Exception as exc:  # noqa: BLE001
+            conn.close()
+            raise DbError(f"couldn't connect: {_first_line(exc)}") from exc
         return self
+
+    async def _session_limits(self, timeout_sec: int) -> None:
+        """Statement time limit. MySQL calls it max_execution_time (ms, SELECT only), MariaDB
+        max_statement_time (seconds, all statements); servers without either still get the
+        client-side limit in _guarded()."""
+        async with self.conn.cursor() as cur:
+            await cur.execute("SELECT VERSION()")
+            version = str((await cur.fetchone())[0]).lower()
+            options = [f"SET SESSION max_statement_time = {timeout_sec}",
+                       f"SET SESSION max_execution_time = {timeout_sec * 1000}"]
+            if "mariadb" not in version:
+                options.reverse()
+            for stmt in options:
+                try:
+                    await cur.execute(stmt)
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    if getattr(exc, "args", (None,))[0] != 1193:  # 1193 = unknown variable
+                        raise
+            for stmt in (f"SET SESSION innodb_lock_wait_timeout = {max(1, timeout_sec)}",
+                         f"SET SESSION lock_wait_timeout = {max(1, timeout_sec)}"):
+                try:
+                    await cur.execute(stmt)
+                except Exception as exc:  # noqa: BLE001
+                    if getattr(exc, "args", (None,))[0] != 1193:
+                        raise
 
     async def close(self) -> None:
         self.conn.close()
