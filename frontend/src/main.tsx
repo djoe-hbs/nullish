@@ -5,6 +5,7 @@ import App from "./App";
 import "./index.css";
 import "./cozy.css";
 import "./sources.css";
+import "./home.css";
 
 const queryClient = new QueryClient();
 

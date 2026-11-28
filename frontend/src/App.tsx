@@ -20,6 +20,7 @@ import { useLegal } from "./legal/useLegal";
 import { ForgotPassword, ResetPassword, VerifyEmail } from "./pages/AuthRecovery";
 import Chat from "./pages/Chat";
 import Dashboard from "./pages/Dashboard";
+import Home from "./pages/Home";
 import Legal from "./pages/Legal";
 import Login from "./pages/Login";
 import { CHAT_TITLE_EVENT, getChatTitle } from "./pageTitle";
@@ -31,13 +32,13 @@ import StorageSetup from "./pages/StorageSetup";
 import Users from "./pages/Users";
 
 type AppTab = "dashboard" | "chat" | "sites" | "status" | "users" | "settings";
-type PublicAuthRoute = "register" | "forgot-password" | "reset-password" | "verify-email";
+type PublicAuthRoute = "home" | "login" | "register" | "forgot-password" | "reset-password" | "verify-email";
 type Route = AppTab | LegalDocId | PublicAuthRoute;
 
 const ADMIN_ONLY_TABS = new Set<Route>(["dashboard", "status", "users"]);
 
 const isPublicAuth = (r: Route): r is PublicAuthRoute =>
-  r === "register" || r === "forgot-password" || r === "reset-password" || r === "verify-email";
+  r === "home" || r === "login" || r === "register" || r === "forgot-password" || r === "reset-password" || r === "verify-email";
 
 const isLegal = (r: Route): r is LegalDocId =>
   r === "privacy" || r === "terms" || r === "disclaimer";
@@ -53,6 +54,8 @@ const parseHash = (): Route | null => {
     h === "status" ||
     h === "users" ||
     h === "settings" ||
+    h === "home" ||
+    h === "login" ||
     h === "register" ||
     h === "forgot-password" ||
     h === "reset-password" ||
@@ -111,7 +114,7 @@ export default function App() {
 
   const resolvedRoute: Route = (() => {
     const r = hashRoute ?? defaultTab;
-    if (signedIn && isPublicAuth(r) && r !== "reset-password" && r !== "verify-email") {
+    if (signedIn && isPublicAuth(r) && r !== "home" && r !== "reset-password" && r !== "verify-email") {
       return defaultTab;
     }
     if (!isAdmin && ADMIN_ONLY_TABS.has(r)) return "chat";
@@ -156,7 +159,9 @@ export default function App() {
 
   useEffect(() => {
     const needsSetup = Boolean(me.data && !me.data.storage_mode);
-    const page = hashRoute === "verify-email"
+    const page = hashRoute === "home"
+      ? "Home"
+      : hashRoute === "verify-email"
       ? "Verify email"
       : hashRoute === "reset-password"
         ? "Reset password"
@@ -271,6 +276,16 @@ export default function App() {
         </p>
       </div>
     );
+  if (!me.data || hashRoute === "home") {
+    const showHome = hashRoute === "home" || (!me.data && hashRoute !== "login" && hashRoute !== "register" && hashRoute !== "forgot-password");
+    if (showHome) {
+      return (
+        <MotionConfig reducedMotion="user">
+          <Home signedIn={Boolean(me.data)} dark={dark} onToggleTheme={() => setDark(!dark)} />
+        </MotionConfig>
+      );
+    }
+  }
   if (!me.data) {
     return (
       <MotionConfig reducedMotion="user">
