@@ -32,6 +32,7 @@ from app.db.models import DataSource, DsPendingChange, DsQueryLog
 from app.llm.chat import ChatTarget
 from app.llm.embed import EmbedClient
 from app.orchestrator.answer import Streamed, done_event, sse, stream_completion
+from app.orchestrator.memory import budgeted_history, format_memory_block
 from app.security.crypto import SecretUnreadable
 
 log = structlog.get_logger()
@@ -177,6 +178,8 @@ async def _complete(chat: ChatTarget, messages: list[dict]) -> str:
 
 async def _log(sessions: async_sessionmaker[AsyncSession], src: DataSource, user_id: int | None,
                r: QueryRecord, pending_id: int | None = None) -> None:
+    if src.id <= 0:
+        return  # browser-local data sources never write audit rows into server Postgres
     async with sessions() as db:
         db.add(DsQueryLog(source_id=src.id, user_id=user_id, sql=r.sql, kind=r.kind,
                           status=r.status, rows=r.rowcount if r.rowcount is not None
@@ -189,12 +192,16 @@ async def run_agent(
     question: str, history: list[dict], src: DataSource, tables: list[Table], *,
     wants_change: bool, settings: Settings, sessions: async_sessionmaker[AsyncSession],
     chat: ChatTarget, embedder: EmbedClient | None, user_id: int | None, state: AgentState,
+    summary: str | None = None,
 ) -> AsyncIterator[str]:
     """Yields SSE events (status, query) while it works; results end up in `state`."""
     hidden = hidden_of(tables)
-    async with sessions() as db:
-        shown = await pick_tables(tables, question, settings, db=db, source_id=src.id,
-                                  embedder=embedder)
+    if src.id > 0:
+        async with sessions() as db:
+            shown = await pick_tables(tables, question, settings, db=db, source_id=src.id,
+                                      embedder=embedder)
+    else:
+        shown = await pick_tables(tables, question, settings)
     schema = "\n\n".join(render_table(t) for t in shown) or "(no tables visible)"
     if len(shown) < len([t for t in tables if not t.hidden]):
         schema += f"\n\nOther tables (use describe to see their columns): {table_names(tables)}"
@@ -206,8 +213,12 @@ async def run_agent(
         desc=f" ({src.description})" if src.description else "", schema=schema,
         limit=src.row_limit, permission=permission,
         change_line=CHANGE_LINE if may_change else "")
-    messages = [{"role": "system", "content": system},
-                *[{"role": m["role"], "content": m["content"][:1500]} for m in history[-4:]],
+    mem_block = format_memory_block(summary, grounded_mode=True)
+    if mem_block:
+        system = f"{system}\n\n{mem_block}"
+    recent = budgeted_history(history, max_messages=8, char_budget=6_000, exclude_last=False,
+                              per_message_cap=2_000)
+    messages = [{"role": "system", "content": system}, *recent,
                 {"role": "user", "content": question}]
 
     by_name = {t.display.lower(): t for t in tables if not t.hidden}
@@ -274,21 +285,35 @@ async def run_agent(
                         rec.status, rec.error = "error", str(exc)
                         feedback = f"[Q{rec.n}] This change would fail: {exc}"
                     else:
-                        async with sessions() as db:
-                            pc = DsPendingChange(
-                                source_id=src.id, user_id=user_id, sql=gate.sql,
-                                sql_hash=sql_hash(gate.sql), kind=gate.kind, reason=purpose,
-                                preview=preview_payload(prev),
-                                expires_at=datetime.now(UTC)
-                                + timedelta(minutes=settings.db_change_expiry_min))
-                            db.add(pc)
-                            await db.commit()
-                            pending_id = pc.id
+                        expires_at = datetime.now(UTC) + timedelta(
+                            minutes=settings.db_change_expiry_min
+                        )
+                        if src.id > 0:
+                            async with sessions() as db:
+                                pc = DsPendingChange(
+                                    source_id=src.id, user_id=user_id, sql=gate.sql,
+                                    sql_hash=sql_hash(gate.sql), kind=gate.kind, reason=purpose,
+                                    preview=preview_payload(prev), expires_at=expires_at)
+                                db.add(pc)
+                                await db.commit()
+                                pending_id = pc.id
+                            rec.pending = {"id": pc.id, "sql": gate.sql, "kind": gate.kind,
+                                           "reason": purpose, "preview": preview_payload(prev),
+                                           "expires_at": pc.expires_at.isoformat(),
+                                           "source": src.name}
+                        else:
+                            rec.pending = {
+                                "id": -rec.n,
+                                "local": True,
+                                "local_source_id": abs(src.id),
+                                "sql": gate.sql,
+                                "kind": gate.kind,
+                                "reason": purpose,
+                                "preview": preview_payload(prev),
+                                "expires_at": expires_at.isoformat(),
+                                "source": src.name,
+                            }
                         rec.status, rec.rowcount = "pending", prev.rowcount
-                        rec.pending = {"id": pc.id, "sql": gate.sql, "kind": gate.kind,
-                                       "reason": purpose, "preview": preview_payload(prev),
-                                       "expires_at": pc.expires_at.isoformat(),
-                                       "source": src.name}
                         n = "an unknown number of" if prev.rowcount is None else prev.rowcount
                         feedback = (f"[Q{rec.n}] Waiting for the user's approval; it would "
                                     f"affect {n} row(s). Nothing has been changed yet.")
@@ -337,7 +362,7 @@ async def database_answer(
     question: str, history: list[dict], src: DataSource, tables: list[Table], *,
     wants_change: bool, settings: Settings, sessions: async_sessionmaker[AsyncSession],
     chat: ChatTarget, embedder: EmbedClient | None, user_id: int | None,
-    max_tokens: int | None, start: float | None = None,
+    max_tokens: int | None, start: float | None = None, summary: str | None = None,
 ) -> AsyncIterator[str]:
     start = start or time.perf_counter()
     yield sse("status", {"stage": "querying", "database": src.name, "n": 0})
@@ -345,7 +370,8 @@ async def database_answer(
     try:
         async for event in run_agent(question, history, src, tables, wants_change=wants_change,
                                      settings=settings, sessions=sessions, chat=chat,
-                                     embedder=embedder, user_id=user_id, state=state):
+                                     embedder=embedder, user_id=user_id, state=state,
+                                     summary=summary):
             yield event
     except Exception as exc:  # noqa: BLE001 - model offline etc.
         log.warning("db_agent_failed", source=src.id, error=f"{type(exc).__name__}: {exc}"[:300])
@@ -356,7 +382,9 @@ async def database_answer(
             return
 
     yield sse("status", {"stage": "writing", "queries": len(state.records)})
-    prompt = [{"role": "system", "content": FINAL_PROMPT},
+    mem_block = format_memory_block(summary, grounded_mode=True)
+    final_sys = f"{FINAL_PROMPT}\n\n{mem_block}" if mem_block else FINAL_PROMPT
+    prompt = [{"role": "system", "content": final_sys},
               {"role": "user", "content":
                   f"Database: {src.name} ({KIND_LABEL[src.kind]}, permission: "
                   f"{PERMISSION_LABEL[src.edit_policy]})"

@@ -60,22 +60,344 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return (res.status === 204 ? undefined : await res.json()) as T;
 }
 
-// ---- Account ------------------------------------------------------------------------------
+// ---- Account & sessions -------------------------------------------------------------------
 
-export type User = { id: number; email: string; role: string };
+export type StorageMode = "db" | "local";
+
+export type User = {
+  id: number;
+  email: string;
+  username: string | null;
+  name: string;
+  role: "admin" | "member" | string;
+  is_active: boolean;
+  approved_at: string | null;
+  email_verified_at: string | null;
+  storage_mode: StorageMode | null;
+  last_login_at: string | null;
+  created_at: string;
+};
+
+export type RegisterInput = {
+  name: string;
+  username: string;
+  email: string;
+  password: string;
+};
+
+export type RegisterOut = {
+  id: number;
+  email: string;
+  username: string;
+  name: string;
+  pending_approval: boolean;
+  email_verification_required: boolean;
+  email_sent: boolean;
+  message: string;
+};
+
+export type MessageOut = {
+  message: string;
+};
+
+export type UserSession = {
+  id: number;
+  user_agent: string | null;
+  ip: string | null;
+  created_at: string;
+  expires_at: string;
+  is_current: boolean;
+};
 
 export const getMe = () => api<User>("/auth/me");
-export const signIn = (email: string, password: string) =>
-  api<User>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) });
+export const setStorageMode = (storage_mode: StorageMode, purge_server_data = false) =>
+  api<User>("/auth/storage-mode", {
+    method: "POST",
+    body: JSON.stringify({ storage_mode, purge_server_data }),
+  });
+export const registerAccount = (body: RegisterInput) =>
+  api<RegisterOut>("/auth/register", { method: "POST", body: JSON.stringify(body) });
+export const verifyEmail = (token: string) =>
+  api<MessageOut>("/auth/verify-email", { method: "POST", body: JSON.stringify({ token }) });
+export const resendVerification = (identifier: string) =>
+  api<MessageOut>("/auth/resend-verification", {
+    method: "POST",
+    body: JSON.stringify({ identifier }),
+  });
+export const forgotPassword = (identifier: string) =>
+  api<MessageOut>("/auth/forgot-password", {
+    method: "POST",
+    body: JSON.stringify({ identifier }),
+  });
+export const resetPassword = (token: string, new_password: string) =>
+  api<MessageOut>("/auth/reset-password", {
+    method: "POST",
+    body: JSON.stringify({ token, new_password }),
+  });
+export const signIn = (identifier: string, password: string) =>
+  api<User>("/auth/login", { method: "POST", body: JSON.stringify({ identifier, password }) });
 export const signOut = () => api<void>("/auth/logout", { method: "POST" });
+export const updateProfile = (body: { name?: string; username?: string; email?: string }) =>
+  api<User>("/auth/profile", { method: "PATCH", body: JSON.stringify(body) });
+export const listSessions = () => api<UserSession[]>("/auth/sessions");
+export const revokeSession = (id: number) => api<void>(`/auth/sessions/${id}`, { method: "DELETE" });
+export const revokeOtherSessions = () => api<void>("/auth/sessions/revoke-others", { method: "POST" });
 export const changePassword = (current_password: string, new_password: string) =>
   api<void>("/auth/change-password", {
     method: "POST",
     body: JSON.stringify({ current_password, new_password }),
   });
 
+export type LegalDocId = "privacy" | "terms" | "disclaimer";
+
+export type LegalMetaApi = {
+  service_name: string;
+  operator_name: string;
+  operator_website: string;
+  contact_email: string;
+  privacy_email: string;
+  jurisdiction: string;
+  effective_date: string;
+  inference_provider: string;
+  training_commitment: string;
+  liability_cap: string;
+};
+
+export type LegalBlock =
+  | { kind: "p"; text: string }
+  | { kind: "ul"; items: string[] }
+  | { kind: "dl"; items: { term: string; detail: string }[] };
+
+export type LegalSection = {
+  heading: string;
+  blocks: LegalBlock[];
+};
+
+export type LegalDocument = {
+  id: LegalDocId;
+  title: string;
+  subtitle: string;
+  summary: string;
+  sections: LegalSection[];
+};
+
+export type LegalSettings = {
+  meta: LegalMetaApi;
+  documents: Partial<Record<LegalDocId, LegalDocument>>;
+};
+
+export const fetchLegalSettings = () => api<LegalSettings>("/legal");
+export const getAdminLegal = () => api<LegalSettings>("/admin/legal");
+export const updateAdminLegal = (body: LegalSettings) =>
+  api<LegalSettings>("/admin/legal", { method: "PUT", body: JSON.stringify(body) });
+export const resetAdminLegal = () =>
+  api<LegalSettings>("/admin/legal/reset", { method: "POST" });
+
 export const getJSON = <T>(path: string) => api<T>(path);
 export const fetchHealth = () => getJSON<Health>("/health");
+
+// ---- Conversations (PostgreSQL) ------------------------------------------------------------
+
+export type StoredMessage = {
+  id?: number;
+  role: "user" | "assistant";
+  content: string;
+  mode?: "sites" | "model" | null;
+  error?: string | null;
+  sources?: Source[] | null;
+  queries?: QueryRecord[] | null;
+  meta?: (ChatDone | AskDone) | null;
+  created_at?: string;
+};
+
+export type ConversationSummary = {
+  id: string;
+  name: string;
+  title_source: "auto" | "llm" | "user";
+  mode: "sites" | "model";
+  selected_sources: number[];
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+};
+
+export type ConversationDetail = ConversationSummary & {
+  messages: StoredMessage[];
+};
+
+export const listConversations = () => api<ConversationSummary[]>("/conversations");
+export const createConversation = (body: {
+  id?: string;
+  name?: string;
+  mode?: "sites" | "model";
+  selected_sources?: number[];
+}) => api<ConversationSummary>("/conversations", { method: "POST", body: JSON.stringify(body) });
+export const getConversation = (id: string) => api<ConversationDetail>(`/conversations/${id}`);
+export const updateConversation = (
+  id: string,
+  body: {
+    name?: string;
+    title_source?: "auto" | "llm" | "user";
+    mode?: "sites" | "model";
+    selected_sources?: number[];
+  },
+) => api<ConversationSummary>(`/conversations/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+export const deleteConversation = (id: string) =>
+  api<void>(`/conversations/${id}`, { method: "DELETE" });
+export const importConversations = (
+  items: {
+    id: string;
+    name: string;
+    title_source: "auto" | "llm" | "user";
+    mode: "sites" | "model";
+    selected_sources: number[];
+    updated_ms?: number;
+    messages: StoredMessage[];
+  }[],
+) => api<ConversationSummary[]>("/conversations/import", { method: "POST", body: JSON.stringify(items) });
+
+// ---- Admin: users, metrics, system settings ------------------------------------------------
+
+export type AdminSiteSummary = {
+  id: number;
+  name: string;
+  root_url: string;
+  enabled: boolean;
+  pages: number;
+  chunks: number;
+  last_job_status: string | null;
+};
+
+export type AdminDbSummary = {
+  id: number;
+  name: string;
+  kind: DbKind;
+  edit_policy: EditPolicy;
+  enabled: boolean;
+  tables: number;
+  last_test_ok: boolean | null;
+  schema_refreshed_at: string | null;
+};
+
+export type AdminUser = {
+  id: number;
+  email: string;
+  username: string | null;
+  name: string;
+  role: "admin" | "member";
+  is_active: boolean;
+  pending_approval: boolean;
+  approved_at: string | null;
+  email_verified: boolean;
+  email_verified_at: string | null;
+  storage_mode?: StorageMode | null;
+  last_login_at: string | null;
+  locked_until: string | null;
+  created_at: string;
+  conversation_count: number;
+  sites: AdminSiteSummary[];
+  databases: AdminDbSummary[];
+};
+
+export type AdminUserCreate = {
+  email: string;
+  username: string;
+  name: string;
+  password: string;
+  role: "admin" | "member";
+};
+
+export type AdminUserUpdate = {
+  email?: string;
+  username?: string;
+  name?: string;
+  role?: "admin" | "member";
+  is_active?: boolean;
+  email_verified?: boolean;
+  password?: string;
+  unlock?: boolean;
+};
+
+export type AdminMetrics = {
+  users: {
+    total: number;
+    active: number;
+    pending_approval: number;
+    admins: number;
+    members: number;
+    active_sessions: number;
+    logins_24h: number;
+  };
+  chats: {
+    conversations: number;
+    messages: number;
+    user_messages: number;
+    assistant_messages: number;
+    messages_24h: number;
+    avg_latency_ms: number | null;
+    avg_first_token_ms: number | null;
+    not_found_count: number;
+    by_intent: Record<string, number>;
+    daily_7d: { date: string; messages: number; queries: number }[];
+  };
+  sites: {
+    total: number;
+    enabled: number;
+    pages_active: number;
+    pages_gone: number;
+    chunks: number;
+    chunks_embedded: number;
+    jobs_running: number;
+    jobs_queued: number;
+    jobs_failed: number;
+  };
+  databases: {
+    total: number;
+    enabled: number;
+    postgres: number;
+    mysql: number;
+    by_policy: Record<string, number>;
+    queries_total: number;
+    queries_ok: number;
+    queries_refused: number;
+    queries_error: number;
+    pending_approvals: number;
+  };
+};
+
+export type SystemSettings = {
+  max_history_chars: number;
+  answer_sources: number;
+  live_verify_pages: number;
+  live_reverify_after_sec: number;
+  live_total_budget_sec: number;
+  default_max_pages: number;
+  default_max_depth: number;
+  default_crawl_delay_ms: number;
+  answer_system_prompt: string;
+  chat_system_prompt: string;
+};
+
+export const listAdminUsers = () => api<AdminUser[]>("/admin/users");
+export const createAdminUser = (body: AdminUserCreate) =>
+  api<AdminUser>("/admin/users", { method: "POST", body: JSON.stringify(body) });
+export const updateAdminUser = (id: number, body: AdminUserUpdate) =>
+  api<AdminUser>(`/admin/users/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+export const approveAdminUser = (id: number) =>
+  api<AdminUser>(`/admin/users/${id}/approve`, { method: "POST" });
+export const verifyAdminUserEmail = (id: number, approve = true) =>
+  api<AdminUser>(`/admin/users/${id}/verify-email`, {
+    method: "POST",
+    body: JSON.stringify({ approve }),
+  });
+export const rejectAdminUser = (id: number) =>
+  api<void>(`/admin/users/${id}/reject`, { method: "POST" });
+export const deleteAdminUser = (id: number) =>
+  api<void>(`/admin/users/${id}`, { method: "DELETE" });
+export const getAdminMetrics = () => api<AdminMetrics>("/admin/metrics");
+export const getSystemSettings = () => api<SystemSettings>("/admin/settings");
+export const updateSystemSettings = (body: SystemSettings) =>
+  api<SystemSettings>("/admin/settings", { method: "PUT", body: JSON.stringify(body) });
 
 // ---- Sites ----------------------------------------------------------------------------------
 
@@ -147,6 +469,13 @@ export type PageRow = {
   chunks_embedded: number;
 };
 
+export type SiteDefaults = {
+  max_pages: number;
+  max_depth: number;
+  crawl_delay_ms: number;
+};
+
+export const getSiteDefaults = () => api<SiteDefaults>("/sites/defaults");
 export const listSites = () => api<Site[]>("/sites");
 export const createSite = (body: SiteInput) =>
   api<Site>("/sites", { method: "POST", body: JSON.stringify(body) });
@@ -232,6 +561,8 @@ export type ChangePreview = {
 export type PendingChange = {
   id: number;
   source_id?: number;
+  local?: boolean;
+  local_source_id?: number;
   source: string;
   sql: string;
   kind: "write" | "ddl";
@@ -261,7 +592,62 @@ export type QueryRecord = {
 
 export type TestResult = { ok: boolean; version: string | null; error: string | null };
 
+export type LocalSchemaItemPayload = {
+  schema_name: string;
+  table_name: string;
+  column_name: string | null;
+  ordinal: number;
+  data_type: string | null;
+  nullable: boolean | null;
+  is_pk: boolean;
+  fk_ref: string | null;
+  row_estimate: number | null;
+  sample_values: unknown[];
+  comment: string | null;
+  note: string | null;
+  hidden: boolean;
+};
+
+export type LocalSourceInput = {
+  id: number;
+  name: string;
+  kind: DbKind;
+  host: string;
+  port: number;
+  database: string;
+  username: string;
+  password: string;
+  ssl_mode: SslMode;
+  edit_policy: EditPolicy;
+  row_limit: number;
+  timeout_sec: number;
+  description: string | null;
+  enabled: boolean;
+  schema_items: LocalSchemaItemPayload[];
+};
+
+export type LocalIntrospectResult = {
+  ok: boolean;
+  version: string | null;
+  error: string | null;
+  tables: LocalSchemaItemPayload[];
+};
+
 export const listSources = () => api<DataSource[]>("/data-sources");
+export const introspectLocalSource = (body: DataSourceInput) =>
+  api<LocalIntrospectResult>("/data-sources/local/introspect", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+export const approveLocalChange = (body: {
+  source: LocalSourceInput;
+  sql: string;
+  kind: "write" | "ddl";
+}) =>
+  api<{ status: "applied" | "failed"; result: { rowcount?: number | null; ms?: number; error?: string } | null }>(
+    "/changes/local/approve",
+    { method: "POST", body: JSON.stringify(body) },
+  );
 export const testSource = (body: DataSourceInput) =>
   api<TestResult>("/data-sources/test", { method: "POST", body: JSON.stringify(body) });
 export const createSource = (body: DataSourceInput) =>
@@ -293,6 +679,7 @@ async function postSSE(
 ): Promise<void> {
   const res = await fetch(`/api/v1${path}`, {
     method: "POST",
+    credentials: "include",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
     signal,
@@ -331,20 +718,33 @@ export type ChatDone = {
   first_token_ms: number | null;
   tokens?: number;
   finish_reason: string | null;
+  message_id?: number;
 };
 
 export type ChatHandlers = {
   onToken: (text: string) => void;
+  onMemory?: (summary: string) => void;
   onDone: (meta: ChatDone) => void;
   onError: (message: string) => void;
 };
 
-export function streamChat(messages: ChatTurn[], h: ChatHandlers, signal: AbortSignal) {
+export function streamChat(
+  messages: ChatTurn[],
+  h: ChatHandlers,
+  signal: AbortSignal,
+  opts?: { conversationId?: string; conversationSummary?: string | null; selectedSources?: number[] },
+) {
   return postSSE(
     "/chat",
-    { messages },
+    {
+      messages,
+      conversation_id: opts?.conversationId,
+      conversation_summary: opts?.conversationSummary ?? undefined,
+      selected_sources: opts?.selectedSources,
+    },
     (event, p) => {
       if (event === "token") h.onToken(p.t);
+      else if (event === "memory") h.onMemory?.(p.summary);
       else if (event === "done") h.onDone(p);
       else if (event === "error") h.onError(p.message);
     },
@@ -361,8 +761,6 @@ export type Source = {
   section: string | null;
   fetched_at: string | null;
   verified_at: string | null;
-  // verified: unchanged on the live site · updated: changed, new text used · new: found live
-  // unverified: live check failed (content may be outdated) · indexed: not re-checked
   live: "verified" | "updated" | "new" | "unverified" | "indexed";
   snippet: string;
   score: number | null;
@@ -401,9 +799,8 @@ export type AskHandlers = {
   onQuery: (q: QueryRecord) => void;
   onSources: (s: Source[]) => void;
   onToken: (text: string) => void;
-  /** The server cleaned the streamed answer (unsupported sentences removed, or withdrawn when
-   *  nothing was validly cited): show `text` instead of what streamed. */
   onReplace: (text: string) => void;
+  onMemory?: (summary: string) => void;
   onDone: (meta: AskDone) => void;
   onError: (message: string) => void;
 };
@@ -414,16 +811,31 @@ export function streamAsk(
   scope: { siteIds: number[]; sourceIds: number[] } | null,
   h: AskHandlers,
   signal: AbortSignal,
+  opts?: {
+    conversationId?: string;
+    conversationSummary?: string | null;
+    selectedSources?: number[];
+    localSources?: LocalSourceInput[];
+  },
 ) {
   return postSSE(
     "/ask",
-    { messages, site_ids: scope ? scope.siteIds : null, source_ids: scope ? scope.sourceIds : null },
+    {
+      messages,
+      site_ids: scope ? scope.siteIds : null,
+      source_ids: scope ? scope.sourceIds : null,
+      conversation_id: opts?.conversationId,
+      conversation_summary: opts?.conversationSummary ?? undefined,
+      selected_sources: opts?.selectedSources,
+      local_sources: opts?.localSources ?? [],
+    },
     (event, p) => {
       if (event === "status") h.onStatus(p);
       else if (event === "query") h.onQuery(p);
       else if (event === "sources") h.onSources(p);
       else if (event === "token") h.onToken(p.t);
       else if (event === "replace") h.onReplace(p.t);
+      else if (event === "memory") h.onMemory?.(p.summary);
       else if (event === "done") h.onDone(p);
       else if (event === "error") h.onError(p.message);
     },
@@ -431,8 +843,11 @@ export function streamAsk(
   );
 }
 
-export const generateTitle = (messages: ChatTurn[]) =>
-  api<{ title: string }>("/title", { method: "POST", body: JSON.stringify({ messages }) });
+export const generateTitle = (messages: ChatTurn[], conversationId?: string) =>
+  api<{ title: string }>("/title", {
+    method: "POST",
+    body: JSON.stringify({ messages, conversation_id: conversationId }),
+  });
 
 // ---- helpers --------------------------------------------------------------------------------
 

@@ -19,6 +19,7 @@ import structlog
 
 from app.db.models import DataSource, Site
 from app.llm.chat import ChatTarget
+from app.orchestrator.memory import format_recent_transcript
 
 log = structlog.get_logger()
 
@@ -140,10 +141,15 @@ def parse_route(raw: str) -> tuple[str, str] | None:
 
 async def route_message(
     chat: ChatTarget, messages: list[dict], sites: list[Site], fallback_query: str,
-    dbs: list[DataSource] | None = None,
+    dbs: list[DataSource] | None = None, *, summary: str | None = None,
 ) -> Route:
-    convo = "\n".join(
-        f"{m['role']}: {m['content'][:600]}" for m in messages[-6:]
+    convo = format_recent_transcript(
+        messages, max_messages=8, char_budget=4_000, per_message_cap=1_200
+    )
+    summary_prefix = (
+        f"Earlier conversation summary:\n{summary.strip()}\n\n"
+        if summary and summary.strip()
+        else ""
     )
     try:
         resp = await chat.client.chat.completions.create(
@@ -152,7 +158,7 @@ async def route_message(
             max_tokens=160,
             messages=[
                 {"role": "system", "content": router_prompt(sites, dbs)},
-                {"role": "user", "content": f"Conversation:\n{convo}\n\nJSON:"},
+                {"role": "user", "content": f"{summary_prefix}Conversation:\n{convo}\n\nJSON:"},
             ],
         )
         raw = resp.choices[0].message.content or "" if resp.choices else ""

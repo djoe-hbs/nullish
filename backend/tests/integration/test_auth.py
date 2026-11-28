@@ -38,13 +38,15 @@ async def test_protected_routes_need_login(client):
 
 async def test_login_me_logout(client):
     bad = await client.post("/api/v1/auth/login", json={"email": EMAIL, "password": "nope"})
-    assert bad.status_code == 401 and "Wrong email or password" in bad.json()["detail"]
+    assert bad.status_code == 401 and "password" in bad.json()["detail"].lower()
     unknown = await client.post("/api/v1/auth/login", json={"email": "x@y.z", "password": "nope"})
     assert unknown.status_code == 401  # same answer: no hint which part was wrong
 
     ok = await client.post("/api/v1/auth/login",
                            json={"email": "  ADMIN@hudsmersolutions.com ", "password": PASSWORD})
     assert ok.status_code == 200 and ok.json()["email"] == EMAIL
+    username = ok.json()["username"]
+    assert username
     cookie = ok.headers["set-cookie"].lower()
     assert "httponly" in cookie and "samesite=lax" in cookie
 
@@ -54,6 +56,15 @@ async def test_login_me_logout(client):
     assert (await client.post("/api/v1/auth/logout")).status_code == 204
     client.cookies.clear()
     assert (await client.get("/api/v1/sites")).status_code == 401
+
+    # Also supports logging in with username (case-insensitively).
+    by_user = await client.post(
+        "/api/v1/auth/login",
+        json={"identifier": f"  {username.upper()} ", "password": PASSWORD},
+    )
+    assert by_user.status_code == 200 and by_user.json()["email"] == EMAIL
+    await client.post("/api/v1/auth/logout")
+    client.cookies.clear()
 
 
 async def test_old_session_token_is_dead_after_logout(client):

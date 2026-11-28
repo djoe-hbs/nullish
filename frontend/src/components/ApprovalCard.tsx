@@ -2,8 +2,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Clock, DatabaseZap, ShieldAlert, X } from "lucide-react";
 import { useState } from "react";
 import {
-  approveChange, getChange, rejectChange, type PendingChange, type ResultTable,
+  approveChange, approveLocalChange, getChange, rejectChange,
+  type PendingChange, type ResultTable, type User,
 } from "../api/client";
+import { getLocalDbs, toLocalSourcePayload } from "../storage/localStore";
 
 function cell(v: unknown): string {
   if (v === null || v === undefined) return "NULL";
@@ -41,24 +43,50 @@ const KIND_TEXT = { write: "Data change", ddl: "Schema change" } as const;
 
 /** A change Smish prepared that waits for the user. Its live status comes from the server, so a
  *  reopened conversation shows whether it was applied, rejected or expired meanwhile. */
-export default function ApprovalCard({ change }: { change: PendingChange }) {
+export default function ApprovalCard({ change, user }: { change: PendingChange; user?: User }) {
   const qc = useQueryClient();
   const [error, setError] = useState<string | null>(null);
+  const [localState, setLocalState] = useState<PendingChange | null>(null);
+  const isLocal = Boolean(change.local);
   const { data } = useQuery({
     queryKey: ["change", change.id],
     queryFn: () => getChange(change.id),
     initialData: { ...change, status: change.status ?? "pending" },
     initialDataUpdatedAt: 0,
+    enabled: !isLocal,
     staleTime: 10_000,
     retry: false,
   });
-  const c = data ?? change;
+  const c = isLocal ? (localState ?? change) : (data ?? change);
   const decide = useMutation({
-    mutationFn: (ok: boolean) => (ok ? approveChange(change.id) : rejectChange(change.id)),
-    onSuccess: (res) => { setError(null); qc.setQueryData(["change", change.id], res); },
+    mutationFn: async (ok: boolean): Promise<PendingChange> => {
+      if (isLocal) {
+        if (!ok) return { ...c, status: "rejected" };
+        if (!user) throw new Error("Missing user context for browser-local database approval.");
+        const localDb = getLocalDbs(user.id).find((d) => d.id === change.local_source_id);
+        if (!localDb) {
+          throw new Error("Local database configuration not found in browser storage.");
+        }
+        const res = await approveLocalChange({
+          source: toLocalSourcePayload(localDb),
+          sql: c.sql,
+          kind: c.kind,
+        });
+        return { ...c, status: res.status, result: res.result };
+      }
+      return ok ? approveChange(change.id) : rejectChange(change.id);
+    },
+    onSuccess: (res) => {
+      setError(null);
+      if (isLocal) {
+        setLocalState(res);
+      } else {
+        qc.setQueryData(["change", change.id], res);
+      }
+    },
     onError: (e: Error) => {
       setError(e.message);
-      qc.invalidateQueries({ queryKey: ["change", change.id] });
+      if (!isLocal) qc.invalidateQueries({ queryKey: ["change", change.id] });
     },
   });
   const status = c.status ?? "pending";

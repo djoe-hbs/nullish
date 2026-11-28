@@ -7,6 +7,7 @@ import {
   Database,
   Eye,
   EyeOff,
+  HardDrive,
   History,
   KeyRound,
   Loader2,
@@ -18,12 +19,13 @@ import {
   Table2,
   Trash2,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   createSource,
   deleteSource,
   getQueryLog,
   getSchema,
+  introspectLocalSource,
   listSources,
   patchSchema,
   refreshSchema,
@@ -38,8 +40,17 @@ import {
   type SchemaItem,
   type SslMode,
   type TestResult,
+  type User,
 } from "../api/client";
 import Collapse from "../components/Collapse";
+import {
+  getLocalDbs,
+  LOCAL_DBS_EVENT,
+  nextLocalDbId,
+  saveLocalDbs,
+  toSchemaItems,
+  type LocalDataSource,
+} from "../storage/localStore";
 
 const KINDS: { id: DbKind; label: string; port: number }[] = [
   { id: "postgres", label: "PostgreSQL", port: 5432 },
@@ -84,10 +95,29 @@ function TestLine({ res }: { res: TestResult | null }) {
     : <p className="test-line bad"><AlertTriangle size={14} /> {res.error}</p>;
 }
 
+function fromLocalSource(s: LocalDataSource, passwordOverride?: string): DataSourceInput {
+  return {
+    name: s.name,
+    description: s.description ?? undefined,
+    kind: s.kind,
+    host: s.host,
+    port: s.port,
+    database: s.database,
+    username: s.username,
+    password: passwordOverride ?? s.password ?? "",
+    ssl_mode: s.ssl_mode,
+    edit_policy: s.edit_policy,
+    row_limit: s.row_limit,
+    timeout_sec: s.timeout_sec,
+    enabled: s.enabled,
+  };
+}
+
 // ---- add a database ---------------------------------------------------------------------------
 
-function AddDatabase() {
+function AddDatabase({ user }: { user: User }) {
   const qc = useQueryClient();
+  const isLocal = user.storage_mode === "local";
   const [kind, setKind] = useState<DbKind>("postgres");
   const [host, setHost] = useState("");
   const [port, setPort] = useState<number | "">("");
@@ -110,11 +140,50 @@ function AddDatabase() {
   });
   const tryIt = useMutation({ mutationFn: () => testSource(body()), onSuccess: setTest });
   const add = useMutation({
-    mutationFn: () => createSource(body()),
+    mutationFn: async () => {
+      const b = body();
+      if (!isLocal) {
+        return await createSource(b);
+      }
+      const res = await introspectLocalSource(b);
+      const list = getLocalDbs(user.id);
+      const now = new Date().toISOString();
+      const schemaItems = res.ok ? toSchemaItems(res.tables) : [];
+      const tableCount = schemaItems.filter((i) => i.column_name === null).length;
+      const entry: LocalDataSource = {
+        id: nextLocalDbId(list),
+        name: (b.name || `${b.database} on ${b.host}`).trim().slice(0, 200),
+        kind: b.kind ?? "postgres",
+        host: b.host ?? "",
+        port: b.port ?? 5432,
+        database: b.database ?? "",
+        username: b.username ?? "",
+        password: b.password ?? "",
+        has_password: Boolean(b.password),
+        ssl_mode: b.ssl_mode ?? "prefer",
+        edit_policy: b.edit_policy ?? "read_only",
+        row_limit: b.row_limit ?? 200,
+        timeout_sec: b.timeout_sec ?? 15,
+        description: b.description ?? null,
+        enabled: true,
+        last_test_at: now,
+        last_test_ok: res.ok,
+        last_error: res.ok ? null : (res.error ?? "Connection failed"),
+        server_version: res.version,
+        schema_refreshed_at: res.ok ? now : null,
+        schema_error: res.ok ? null : (res.error ?? null),
+        tables: tableCount,
+        created_at: now,
+        schema_items: schemaItems,
+        query_log: [],
+      };
+      saveLocalDbs(user.id, [...list, entry]);
+      return entry;
+    },
     onSuccess: () => {
       setHost(""); setPort(""); setDatabase(""); setUsername(""); setPassword(""); setName("");
       setDescription(""); setTest(null); setMore(false);
-      qc.invalidateQueries({ queryKey: ["data-sources"] });
+      if (!isLocal) qc.invalidateQueries({ queryKey: ["data-sources"] });
     },
   });
   const ready = host.trim() && database.trim() && username.trim();
@@ -163,7 +232,7 @@ function AddDatabase() {
             <input placeholder={database && host ? `${database} on ${host}` : "e.g. Shop database"}
               value={name} onChange={(e) => setName(e.target.value)} />
           </label>
-          <label>What's in it (helps Smish pick the right database)
+          <label>What&apos;s in it (helps Smish pick the right database)
             <input placeholder="Orders, customers and products of the online shop" value={description}
               onChange={(e) => setDescription(e.target.value)} />
           </label>
@@ -185,7 +254,7 @@ function AddDatabase() {
           </label>
         </div>
         <p className="db-tip"><KeyRound size={13} /> Tip: give Smish its own database user. For
-          "Never edit", a user that can only read (e.g. <code>GRANT SELECT</code>) is the
+          &quot;Never edit&quot;, a user that can only read (e.g. <code>GRANT SELECT</code>) is the
           strongest protection.</p>
       </Collapse>
       <div className="actions db-submit">
@@ -195,7 +264,7 @@ function AddDatabase() {
         </button>
         <button type="submit" className="primary" disabled={!ready || add.isPending}>
           {add.isPending ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
-          {add.isPending ? "Connecting…" : "Add database"}
+          {add.isPending ? "Connecting…" : isLocal ? "Save in browser" : "Add database"}
         </button>
       </div>
       <TestLine res={test} />
@@ -217,18 +286,43 @@ function Note({ item, save }: { item: SchemaItem; save: (note: string) => void }
   );
 }
 
-function Schema({ source }: { source: DataSource }) {
+function Schema({ user, source }: { user: User; source: DataSource | LocalDataSource }) {
   const qc = useQueryClient();
+  const isLocal = user.storage_mode === "local";
   const key = ["schema", source.id];
-  const { data, isLoading } = useQuery({ queryKey: key, queryFn: () => getSchema(source.id) });
+  const { data: serverData, isLoading } = useQuery({
+    queryKey: key,
+    queryFn: () => getSchema(source.id),
+    enabled: !isLocal,
+  });
   const [open, setOpen] = useState<string | null>(null);
   const patch = useMutation({
-    mutationFn: (items: { id: number; note?: string | null; hidden?: boolean }[]) =>
-      patchSchema(source.id, items),
-    onSuccess: (items) => qc.setQueryData(key, items),
+    mutationFn: async (items: { id: number; note?: string | null; hidden?: boolean }[]) => {
+      if (!isLocal) return await patchSchema(source.id, items);
+      const list = getLocalDbs(user.id);
+      const idx = list.findIndex((d) => d.id === source.id);
+      if (idx < 0) return [];
+      const patchMap = new Map(items.map((p) => [p.id, p]));
+      const updatedItems = list[idx].schema_items.map((it) => {
+        const p = patchMap.get(it.id);
+        if (!p) return it;
+        return {
+          ...it,
+          note: "note" in p ? ((p.note ?? "").trim() || null) : it.note,
+          hidden: p.hidden !== undefined ? p.hidden : it.hidden,
+        };
+      });
+      list[idx] = { ...list[idx], schema_items: updatedItems };
+      saveLocalDbs(user.id, list);
+      return updatedItems;
+    },
+    onSuccess: (items) => {
+      if (!isLocal) qc.setQueryData(key, items);
+    },
   });
-  if (isLoading) return <p className="muted-line">Loading tables…</p>;
-  const tables = (data ?? []).filter((i) => i.column_name === null);
+  if (!isLocal && isLoading) return <p className="muted-line">Loading tables…</p>;
+  const data = isLocal ? ((source as LocalDataSource).schema_items ?? []) : (serverData ?? []);
+  const tables = data.filter((i) => i.column_name === null);
   if (!tables.length) return <p className="muted-line">No tables found (or no permission to read them).</p>;
 
   return (
@@ -237,7 +331,7 @@ function Schema({ source }: { source: DataSource }) {
         Notes help Smish understand what the data means.</p>
       {tables.map((t) => {
         const id = `${t.schema_name}.${t.table_name}`;
-        const cols = (data ?? []).filter((c) => c.column_name !== null && c.table_name === t.table_name
+        const cols = data.filter((c) => c.column_name !== null && c.table_name === t.table_name
           && c.schema_name === t.schema_name);
         const isOpen = open === id;
         return (
@@ -296,11 +390,16 @@ const LOG_STATUS: Record<string, string> = {
   rejected: "rejected",
 };
 
-function QueryLog({ source }: { source: DataSource }) {
-  const { data, isLoading } = useQuery({
-    queryKey: ["db-log", source.id], queryFn: () => getQueryLog(source.id), refetchInterval: 15_000,
+function QueryLog({ user, source }: { user: User; source: DataSource | LocalDataSource }) {
+  const isLocal = user.storage_mode === "local";
+  const { data: serverData, isLoading } = useQuery({
+    queryKey: ["db-log", source.id],
+    queryFn: () => getQueryLog(source.id),
+    refetchInterval: 15_000,
+    enabled: !isLocal,
   });
-  if (isLoading) return <p className="muted-line">Loading…</p>;
+  const data = isLocal ? ((source as LocalDataSource).query_log ?? []) : serverData;
+  if (!isLocal && isLoading) return <p className="muted-line">Loading…</p>;
   if (!data?.length) return <p className="muted-line">Nothing has run on this database yet.</p>;
   return (
     <div className="page-table">
@@ -326,8 +425,11 @@ function QueryLog({ source }: { source: DataSource }) {
 
 // ---- one database -----------------------------------------------------------------------------
 
-function EditConnection({ source, done }: { source: DataSource; done: () => void }) {
+function EditConnection({ user, source, done }: {
+  user: User; source: DataSource | LocalDataSource; done: () => void;
+}) {
   const qc = useQueryClient();
+  const isLocal = user.storage_mode === "local";
   const [host, setHost] = useState(source.host);
   const [port, setPort] = useState(source.port);
   const [database, setDatabase] = useState(source.database);
@@ -337,16 +439,48 @@ function EditConnection({ source, done }: { source: DataSource; done: () => void
   const [description, setDescription] = useState(source.description ?? "");
   const [ssl, setSsl] = useState<SslMode>(source.ssl_mode);
   const save = useMutation({
-    mutationFn: () => updateSource(source.id, {
-      host, port, database, username, name, description, ssl_mode: ssl,
-      ...(password ? { password } : {}),
-    }),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ["data-sources"] }); done(); },
+    mutationFn: async () => {
+      if (!isLocal) {
+        return await updateSource(source.id, {
+          host, port, database, username, name, description, ssl_mode: ssl,
+          ...(password ? { password } : {}),
+        });
+      }
+      const list = getLocalDbs(user.id);
+      const idx = list.findIndex((d) => d.id === source.id);
+      if (idx < 0) throw new Error("Local database entry not found.");
+      const cur = list[idx];
+      const nextPw = password || cur.password;
+      const updated: LocalDataSource = {
+        ...cur,
+        host,
+        port,
+        database,
+        username,
+        name: name.trim() || cur.name,
+        description: description || null,
+        ssl_mode: ssl,
+        password: nextPw,
+        has_password: Boolean(nextPw),
+      };
+      const res = await testSource(fromLocalSource(updated, nextPw));
+      updated.last_test_at = new Date().toISOString();
+      updated.last_test_ok = res.ok;
+      updated.last_error = res.error;
+      if (res.version) updated.server_version = res.version;
+      list[idx] = updated;
+      saveLocalDbs(user.id, list);
+      return updated;
+    },
+    onSuccess: () => {
+      if (!isLocal) qc.invalidateQueries({ queryKey: ["data-sources"] });
+      done();
+    },
   });
   return (
     <form className="add-options edit-db" onSubmit={(e) => { e.preventDefault(); save.mutate(); }}>
       <label>Display name<input value={name} onChange={(e) => setName(e.target.value)} /></label>
-      <label>What's in it<input value={description} onChange={(e) => setDescription(e.target.value)} /></label>
+      <label>What&apos;s in it<input value={description} onChange={(e) => setDescription(e.target.value)} /></label>
       <label>Host<input value={host} onChange={(e) => setHost(e.target.value)} /></label>
       <label>Port<input type="number" value={port} onChange={(e) => setPort(Number(e.target.value))} /></label>
       <label>Database<input value={database} onChange={(e) => setDatabase(e.target.value)} /></label>
@@ -380,26 +514,85 @@ function dbState(s: DataSource) {
   return { cls: "", icon: Plug, text: "Not tested" };
 }
 
-function DatabaseCard({ source }: { source: DataSource }) {
+function DatabaseCard({ user, source }: { user: User; source: DataSource | LocalDataSource }) {
   const qc = useQueryClient();
+  const isLocal = user.storage_mode === "local";
   const [open, setOpen] = useState(false);
   const [panel, setPanel] = useState<"tables" | "log" | "edit" | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [test, setTest] = useState<TestResult | null>(null);
-  const refresh = () => qc.invalidateQueries({ queryKey: ["data-sources"] });
+  const refresh = () => {
+    if (!isLocal) qc.invalidateQueries({ queryKey: ["data-sources"] });
+  };
+  const patchLocal = (fn: (cur: LocalDataSource) => LocalDataSource) => {
+    const list = getLocalDbs(user.id);
+    const idx = list.findIndex((d) => d.id === source.id);
+    if (idx < 0) return null;
+    list[idx] = fn(list[idx]);
+    saveLocalDbs(user.id, list);
+    return list[idx];
+  };
   const policy = useMutation({
-    mutationFn: (edit_policy: EditPolicy) => updateSource(source.id, { edit_policy }),
+    mutationFn: async (edit_policy: EditPolicy) =>
+      isLocal ? patchLocal((c) => ({ ...c, edit_policy })) : await updateSource(source.id, { edit_policy }),
     onSettled: refresh,
   });
-  const retest = useMutation({ mutationFn: () => retestSource(source.id), onSuccess: setTest, onSettled: refresh });
+  const retest = useMutation({
+    mutationFn: async () => {
+      if (!isLocal) return await retestSource(source.id);
+      const localSrc = source as LocalDataSource;
+      const res = await testSource(fromLocalSource(localSrc));
+      patchLocal((c) => ({
+        ...c,
+        last_test_at: new Date().toISOString(),
+        last_test_ok: res.ok,
+        last_error: res.error,
+        server_version: res.version ?? c.server_version,
+      }));
+      return res;
+    },
+    onSuccess: setTest,
+    onSettled: refresh,
+  });
   const reread = useMutation({
-    mutationFn: () => refreshSchema(source.id),
-    onSettled: () => { refresh(); qc.invalidateQueries({ queryKey: ["schema", source.id] }); },
+    mutationFn: async () => {
+      if (!isLocal) return await refreshSchema(source.id);
+      const localSrc = source as LocalDataSource;
+      const res = await introspectLocalSource(fromLocalSource(localSrc));
+      if (!res.ok) {
+        patchLocal((c) => ({ ...c, schema_error: res.error ?? "Couldn't read tables" }));
+        throw new Error(res.error ?? "Couldn't read tables");
+      }
+      const nextItems = toSchemaItems(res.tables, localSrc.schema_items);
+      const tableCount = nextItems.filter((i) => i.column_name === null).length;
+      return patchLocal((c) => ({
+        ...c,
+        schema_items: nextItems,
+        tables: tableCount,
+        schema_refreshed_at: new Date().toISOString(),
+        schema_error: null,
+        server_version: res.version ?? c.server_version,
+      }));
+    },
+    onSettled: () => {
+      refresh();
+      if (!isLocal) qc.invalidateQueries({ queryKey: ["schema", source.id] });
+    },
   });
   const toggle = useMutation({
-    mutationFn: () => updateSource(source.id, { enabled: !source.enabled }), onSettled: refresh,
+    mutationFn: async () =>
+      isLocal
+        ? patchLocal((c) => ({ ...c, enabled: !c.enabled }))
+        : await updateSource(source.id, { enabled: !source.enabled }),
+    onSettled: refresh,
   });
-  const remove = useMutation({ mutationFn: () => deleteSource(source.id), onSettled: refresh });
+  const remove = useMutation({
+    mutationFn: async () => {
+      if (!isLocal) return await deleteSource(source.id);
+      saveLocalDbs(user.id, getLocalDbs(user.id).filter((d) => d.id !== source.id));
+    },
+    onSettled: refresh,
+  });
   const state = dbState(source);
   const StateIcon = state.icon;
   const show = (p: typeof panel) => setPanel((v) => (v === p ? null : p));
@@ -459,34 +652,65 @@ function DatabaseCard({ source }: { source: DataSource }) {
             )}
           </div>
           {confirmDelete && <p className="muted-line">This removes the connection, notes and query log from Smish.
-            The database itself isn't touched.</p>}
+            The database itself isn&apos;t touched.</p>}
           <TestLine res={test} />
           {(policy.isError || reread.isError || toggle.isError || remove.isError) && (
             <p className="form-error" style={{ margin: 0 }}>
               {String((policy.error ?? reread.error ?? toggle.error ?? remove.error)?.message)}
             </p>
           )}
-          {panel === "tables" && <Schema source={source} />}
-          {panel === "log" && <QueryLog source={source} />}
-          {panel === "edit" && <EditConnection source={source} done={() => setPanel(null)} />}
+          {panel === "tables" && <Schema user={user} source={source} />}
+          {panel === "log" && <QueryLog user={user} source={source} />}
+          {panel === "edit" && <EditConnection user={user} source={source} done={() => setPanel(null)} />}
         </div>
       </Collapse>
     </div>
   );
 }
 
-export default function Databases() {
-  const { data, isLoading, error } = useQuery({ queryKey: ["data-sources"], queryFn: listSources });
+export default function Databases({ user }: { user: User }) {
+  const isLocal = user.storage_mode === "local";
+  const [localDbs, setLocalDbs] = useState<LocalDataSource[]>(() =>
+    isLocal ? getLocalDbs(user.id) : [],
+  );
+  useEffect(() => {
+    if (!isLocal) return;
+    const sync = () => setLocalDbs(getLocalDbs(user.id));
+    sync();
+    window.addEventListener(LOCAL_DBS_EVENT, sync);
+    return () => window.removeEventListener(LOCAL_DBS_EVENT, sync);
+  }, [isLocal, user.id]);
+
+  const { data: serverDbs, isLoading, error } = useQuery({
+    queryKey: ["data-sources"],
+    queryFn: listSources,
+    enabled: !isLocal,
+  });
+  const rows = isLocal ? localDbs : serverDbs;
+
   return (
     <section className="space-y-4">
-      <AddDatabase />
-      {isLoading && <p className="text-sm text-zinc-500">Loading databases…</p>}
-      {error && <p className="form-error">{String(error.message)}</p>}
-      {data?.length === 0 && (
+      {isLocal && (
+        <div className="storage-banner" role="note">
+          <HardDrive size={16} />
+          <span>
+            <strong>Browser local storage active:</strong> Database credentials, tables, and query
+            logs stay strictly in this browser and are never saved on the server. Clearing browser
+            site data or changing devices will wipe them.{" "}
+            <a href="#settings" style={{ color: "inherit", textDecoration: "underline" }}>
+              Manage in Settings
+            </a>
+          </span>
+        </div>
+      )}
+      <AddDatabase user={user} />
+      {!isLocal && isLoading && <p className="text-sm text-zinc-500">Loading databases…</p>}
+      {!isLocal && error && <p className="form-error">{String(error.message)}</p>}
+      {rows?.length === 0 && (
         <p className="text-sm text-zinc-500">No databases yet. Connect one above, then ask about its data in Chat.</p>
       )}
       <div className="site-list">
-        {data?.map((s) => <DatabaseCard key={s.id} source={s} />)}
+        {rows?.map((s) => <DatabaseCard key={s.id} user={user} source={s} />)}
       </div>
     </section>
   );

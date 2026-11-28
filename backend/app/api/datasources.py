@@ -15,7 +15,19 @@ from app.auth.deps import current_user
 from app.config import get_settings
 from app.datasources.connectors import DEFAULT_PORTS, DbError, connect
 from app.datasources.hosts import HostNotAllowed
-from app.datasources.schema import hidden_of, load_schema, refresh_schema
+from app.datasources.local import (
+    LocalIntrospectOut,
+    LocalSourceIn,
+    tables_to_schema_payloads,
+    to_ephemeral_source,
+)
+from app.datasources.schema import (
+    build_tables,
+    collect_samples,
+    hidden_of,
+    load_schema,
+    refresh_schema,
+)
 from app.datasources.sqlgate import check, decide, sql_hash
 from app.db.models import DataSource, DsPendingChange, DsQueryLog, DsSchemaItem, User
 from app.db.session import get_session
@@ -151,17 +163,24 @@ def out(src: DataSource, tables: int = 0) -> SourceOut:
         schema_error=src.schema_error, tables=tables, created_at=src.created_at)
 
 
-async def get_source(db: AsyncSession, source_id: int) -> DataSource:
+async def get_source(db: AsyncSession, source_id: int, user_id: int | None = None) -> DataSource:
     src = await db.get(DataSource, source_id)
-    if src is None:
+    if src is None or (user_id is not None and src.user_id is not None and src.user_id != user_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "database not found")
     return src
 
 
-async def table_counts(db: AsyncSession) -> dict[int, int]:
-    rows = await db.execute(
+async def table_counts(db: AsyncSession, source_ids: list[int] | None = None) -> dict[int, int]:
+    q = (
         select(DsSchemaItem.source_id, func.count())
-        .where(DsSchemaItem.column_name.is_(None)).group_by(DsSchemaItem.source_id))
+        .where(DsSchemaItem.column_name.is_(None))
+        .group_by(DsSchemaItem.source_id)
+    )
+    if source_ids is not None:
+        if not source_ids:
+            return {}
+        q = q.where(DsSchemaItem.source_id.in_(source_ids))
+    rows = await db.execute(q)
     return dict(rows.all())
 
 
@@ -189,10 +208,38 @@ async def record_test(db: AsyncSession, src: DataSource, res: TestResult) -> Non
 # ---- connections -----------------------------------------------------------------------------
 
 
+class LocalChangeApproveIn(BaseModel):
+    source: LocalSourceIn
+    sql: str = Field(min_length=1, max_length=20_000)
+    kind: Literal["write", "ddl"]
+
+
+class LocalChangeApproveOut(BaseModel):
+    status: Literal["applied", "failed"]
+    result: dict | None = None
+
+
+LOCAL_DB_MSG = (
+    "Your account uses Browser Local Storage. Database credentials are kept in your browser "
+    "and not saved in the server database."
+)
+
+
+def _require_db_storage(me: User) -> None:
+    if me.storage_mode == "local":
+        raise HTTPException(status.HTTP_409_CONFLICT, LOCAL_DB_MSG)
+
+
 @router.get("/data-sources", response_model=list[SourceOut])
-async def list_sources(db: DB) -> list[SourceOut]:
-    counts = await table_counts(db)
-    srcs = (await db.scalars(select(DataSource).order_by(DataSource.id))).all()
+async def list_sources(db: DB, me: Me) -> list[SourceOut]:
+    if me.storage_mode == "local":
+        return []
+    srcs = (
+        await db.scalars(
+            select(DataSource).where(DataSource.user_id == me.id).order_by(DataSource.id)
+        )
+    ).all()
+    counts = await table_counts(db, [s.id for s in srcs])
     return [out(s, counts.get(s.id, 0)) for s in srcs]
 
 
@@ -206,9 +253,50 @@ async def test_unsaved(body: SourceCreate) -> TestResult:
     return await run_test(src, password=body.password or "")
 
 
-@router.post("/data-sources", response_model=SourceOut, status_code=201)
-async def create_source(body: SourceCreate, db: DB) -> SourceOut:
+@router.post("/data-sources/local/introspect", response_model=LocalIntrospectOut)
+async def introspect_local_source(body: SourceCreate, me: Me) -> LocalIntrospectOut:
+    """Connect ephemerally and inspect schema without writing anything to Postgres."""
+    _ = me
+    settings = get_settings()
     src = DataSource(
+        kind=body.kind,
+        host=body.host,
+        port=body.port or DEFAULT_PORTS[body.kind],
+        database=body.database,
+        username=body.username,
+        ssl_mode=body.ssl_mode or "prefer",
+        timeout_sec=body.timeout_sec or 15,
+    )
+    try:
+        async with connect(src, settings, password=body.password or "") as conn:
+            version = await conn.version()
+            raw = await conn.introspect()
+            tables = build_tables(raw, conn.default_schema)
+            await collect_samples(conn, src.kind, tables)
+            return LocalIntrospectOut(
+                ok=True,
+                version=version,
+                tables=tables_to_schema_payloads(tables),
+            )
+    except (DbError, HostNotAllowed, SecretUnreadable) as exc:
+        return LocalIntrospectOut(ok=False, error=str(exc))
+    except Exception as exc:  # noqa: BLE001 - report clean test/introspect error
+        log.warning(
+            "local_db_introspect_failed",
+            kind=src.kind,
+            error=f"{type(exc).__name__}: {exc}"[:300],
+        )
+        return LocalIntrospectOut(
+            ok=False,
+            error=f"couldn't connect ({type(exc).__name__}: {str(exc)[:200] or 'no details'})",
+        )
+
+
+@router.post("/data-sources", response_model=SourceOut, status_code=201)
+async def create_source(body: SourceCreate, db: DB, me: Me) -> SourceOut:
+    _require_db_storage(me)
+    src = DataSource(
+        user_id=me.id,
         name=(body.name or f"{body.database} on {body.host}").strip()[:200], kind=body.kind,
         host=body.host, port=body.port or DEFAULT_PORTS[body.kind], database=body.database,
         username=body.username,
@@ -236,8 +324,9 @@ async def create_source(body: SourceCreate, db: DB) -> SourceOut:
 
 
 @router.patch("/data-sources/{source_id}", response_model=SourceOut)
-async def update_source(source_id: int, body: SourceSettings, db: DB) -> SourceOut:
-    src = await get_source(db, source_id)
+async def update_source(source_id: int, body: SourceSettings, db: DB, me: Me) -> SourceOut:
+    _require_db_storage(me)
+    src = await get_source(db, source_id, me.id)
     data = body.model_dump(exclude_unset=True)
     reconnect = any(k in data for k in ("host", "port", "database", "username", "password",
                                         "ssl_mode"))
@@ -254,27 +343,28 @@ async def update_source(source_id: int, body: SourceSettings, db: DB) -> SourceO
         raise HTTPException(status.HTTP_409_CONFLICT, "a database with that name exists") from exc
     if reconnect:
         await record_test(db, src, await run_test(src))
-    return out(src, (await table_counts(db)).get(src.id, 0))
+    return out(src, (await table_counts(db, [src.id])).get(src.id, 0))
 
 
 @router.delete("/data-sources/{source_id}", status_code=204)
-async def delete_source(source_id: int, db: DB) -> None:
-    src = await get_source(db, source_id)
+async def delete_source(source_id: int, db: DB, me: Me) -> None:
+    src = await get_source(db, source_id, me.id)
     await db.delete(src)
     await db.commit()
 
 
 @router.post("/data-sources/{source_id}/test", response_model=TestResult)
-async def test_saved(source_id: int, db: DB) -> TestResult:
-    src = await get_source(db, source_id)
+async def test_saved(source_id: int, db: DB, me: Me) -> TestResult:
+    src = await get_source(db, source_id, me.id)
     res = await run_test(src)
     await record_test(db, src, res)
     return res
 
 
 @router.post("/data-sources/{source_id}/refresh-schema", response_model=SourceOut)
-async def refresh(source_id: int, db: DB) -> SourceOut:
-    src = await get_source(db, source_id)
+async def refresh(source_id: int, db: DB, me: Me) -> SourceOut:
+    _require_db_storage(me)
+    src = await get_source(db, source_id, me.id)
     try:
         tables = await refresh_schema(db, src, get_settings(), get_embedder())
     except (DbError, HostNotAllowed, SecretUnreadable) as exc:
@@ -290,8 +380,8 @@ async def refresh(source_id: int, db: DB) -> SourceOut:
 
 
 @router.get("/data-sources/{source_id}/schema", response_model=list[SchemaItemOut])
-async def get_schema(source_id: int, db: DB) -> list[SchemaItemOut]:
-    await get_source(db, source_id)
+async def get_schema(source_id: int, db: DB, me: Me) -> list[SchemaItemOut]:
+    await get_source(db, source_id, me.id)
     items = (await db.scalars(
         select(DsSchemaItem).where(DsSchemaItem.source_id == source_id)
         .order_by(DsSchemaItem.schema_name, DsSchemaItem.table_name,
@@ -300,8 +390,11 @@ async def get_schema(source_id: int, db: DB) -> list[SchemaItemOut]:
 
 
 @router.patch("/data-sources/{source_id}/schema", response_model=list[SchemaItemOut])
-async def patch_schema(source_id: int, body: list[SchemaPatch], db: DB) -> list[SchemaItemOut]:
-    await get_source(db, source_id)
+async def patch_schema(
+    source_id: int, body: list[SchemaPatch], db: DB, me: Me
+) -> list[SchemaItemOut]:
+    _require_db_storage(me)
+    await get_source(db, source_id, me.id)
     ids = [p.id for p in body]
     items = {i.id: i for i in (await db.scalars(
         select(DsSchemaItem).where(DsSchemaItem.source_id == source_id,
@@ -316,16 +409,16 @@ async def patch_schema(source_id: int, body: list[SchemaPatch], db: DB) -> list[
         if p.hidden is not None:
             item.hidden = p.hidden
     await db.commit()
-    return await get_schema(source_id, db)
+    return await get_schema(source_id, db, me)
 
 
 # ---- audit log -------------------------------------------------------------------------------
 
 
 @router.get("/data-sources/{source_id}/log", response_model=list[LogOut])
-async def query_log(source_id: int, db: DB,
+async def query_log(source_id: int, db: DB, me: Me,
                     limit: Annotated[int, Query(ge=1, le=500)] = 100) -> list[LogOut]:
-    await get_source(db, source_id)
+    await get_source(db, source_id, me.id)
     rows = (await db.scalars(
         select(DsQueryLog).where(DsQueryLog.source_id == source_id)
         .order_by(DsQueryLog.id.desc()).limit(limit))).all()
@@ -344,22 +437,24 @@ def change_out(c: DsPendingChange, src_name: str) -> ChangeOut:
                      created_at=c.created_at, expires_at=c.expires_at, decided_at=c.decided_at)
 
 
-async def get_change(db: AsyncSession, change_id: int) -> tuple[DsPendingChange, DataSource]:
+async def get_change(
+    db: AsyncSession, change_id: int, user_id: int | None = None
+) -> tuple[DsPendingChange, DataSource]:
     c = await db.get(DsPendingChange, change_id, with_for_update=True)
     if c is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "change not found")
-    return c, await get_source(db, c.source_id)
+    return c, await get_source(db, c.source_id, user_id)
 
 
 @router.get("/changes/{change_id}", response_model=ChangeOut)
-async def get_pending(change_id: int, db: DB) -> ChangeOut:
-    c, src = await get_change(db, change_id)
+async def get_pending(change_id: int, db: DB, me: Me) -> ChangeOut:
+    c, src = await get_change(db, change_id, me.id)
     return change_out(c, src.name)
 
 
 @router.post("/changes/{change_id}/approve", response_model=ChangeOut)
 async def approve(change_id: int, db: DB, me: Me) -> ChangeOut:
-    c, src = await get_change(db, change_id)
+    c, src = await get_change(db, change_id, me.id)
     if c.status != "pending":
         raise HTTPException(status.HTTP_409_CONFLICT, f"this change is already {c.status}")
     now = datetime.now(UTC)
@@ -403,7 +498,7 @@ async def approve(change_id: int, db: DB, me: Me) -> ChangeOut:
 
 @router.post("/changes/{change_id}/reject", response_model=ChangeOut)
 async def reject(change_id: int, db: DB, me: Me) -> ChangeOut:
-    c, src = await get_change(db, change_id)
+    c, src = await get_change(db, change_id, me.id)
     if c.status != "pending":
         raise HTTPException(status.HTTP_409_CONFLICT, f"this change is already {c.status}")
     c.status, c.decided_at, c.decided_by = "rejected", datetime.now(UTC), me.id
@@ -411,3 +506,26 @@ async def reject(change_id: int, db: DB, me: Me) -> ChangeOut:
                       status="rejected", pending_id=c.id))
     await db.commit()
     return change_out(c, src.name)
+
+
+@router.post("/changes/local/approve", response_model=LocalChangeApproveOut)
+async def approve_local_change(body: LocalChangeApproveIn, me: Me) -> LocalChangeApproveOut:
+    """Execute a pending change against a browser-stored database with zero server DB state."""
+    src, tables = to_ephemeral_source(body.source, me.id)
+    gate = check(body.sql, src.kind, row_limit=src.row_limit, hidden=hidden_of(tables))
+    if gate.kind not in ("write", "ddl") or decide(gate.kind, src.edit_policy) == "refuse":
+        reason = gate.reason or (
+            "this database is set to Never edit"
+            if src.edit_policy == "read_only"
+            else "not allowed"
+        )
+        raise HTTPException(status.HTTP_409_CONFLICT, f"refused: {reason}")
+    try:
+        async with connect(src, get_settings()) as conn:
+            res = await conn.execute(gate.sql)
+        return LocalChangeApproveOut(
+            status="applied",
+            result={"rowcount": res.rowcount, "ms": res.ms},
+        )
+    except (DbError, HostNotAllowed, SecretUnreadable) as exc:
+        return LocalChangeApproveOut(status="failed", result={"error": str(exc)})

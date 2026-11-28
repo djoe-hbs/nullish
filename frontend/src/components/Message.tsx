@@ -13,7 +13,7 @@ import {
 import { useQuery } from "@tanstack/react-query";
 import { Fragment, lazy, Suspense, useState } from "react";
 import {
-  getChange, timeAgo, type AskDone, type ChatDone, type ChatTurn, type QueryRecord, type Source,
+  getChange, timeAgo, type AskDone, type ChatDone, type ChatTurn, type QueryRecord, type Source, type User,
 } from "../api/client";
 import ApprovalCard, { ResultGrid } from "./ApprovalCard";
 import Collapse from "./Collapse";
@@ -113,10 +113,11 @@ const QUERY_STATUS: Record<QueryRecord["status"], string> = {
 
 /** A queued change's status comes from the server (it may have been approved since). */
 function QueryStatus({ q }: { q: QueryRecord }) {
+  const isLocal = Boolean(q.pending?.local);
   const { data } = useQuery({
     queryKey: ["change", q.pending?.id],
     queryFn: () => getChange(q.pending!.id),
-    enabled: !!q.pending,
+    enabled: !!q.pending && !isLocal,
     staleTime: 10_000,
     retry: false,
   });
@@ -259,7 +260,7 @@ function Footer({ m }: { m: Msg }) {
   );
 }
 
-export function Bubble({ m }: { m: Msg }) {
+export function Bubble({ m, user }: { m: Msg; user?: User }) {
   if (m.role === "user") {
     return <div className="msg user"><div className="msg-user">{m.content}</div></div>;
   }
@@ -284,7 +285,7 @@ export function Bubble({ m }: { m: Msg }) {
           {m.error && <p className="msg-error">{m.error}</p>}
         </div>
         {(m.queries ?? []).filter((q) => q.pending).map((q) => (
-          <ApprovalCard key={q.pending!.id} change={q.pending!} />
+          <ApprovalCard key={q.pending!.id} change={q.pending!} user={user} />
         ))}
         {!m.pending && (m.meta || (m.sources?.length ?? 0) > 0 || (m.queries?.length ?? 0) > 0)
           && <Footer m={m} />}

@@ -14,12 +14,13 @@ import {
   RefreshCw,
   Trash2,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   crawlSite,
   createSite,
   deleteSite,
   fetchHealth,
+  getSiteDefaults,
   listPages,
   listSites,
   timeAgo,
@@ -55,6 +56,13 @@ function AddSite() {
   const [robots, setRobots] = useState(true);
   const [delay, setDelay] = useState(500);
   const [search, setSearch] = useState("");
+  const { data: defaults } = useQuery({ queryKey: ["site-defaults"], queryFn: getSiteDefaults });
+  useEffect(() => {
+    if (!defaults || more) return;
+    setMaxPages(defaults.max_pages);
+    setDepth(defaults.max_depth);
+    setDelay(defaults.crawl_delay_ms);
+  }, [defaults, more]);
 
   const add = useMutation({
     mutationFn: (body: SiteInput) => createSite(body),

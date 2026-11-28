@@ -1,11 +1,12 @@
-"""Password hashing (Argon2id) and session tokens.
+"""Password hashing (Argon2id), input validation, and session tokens.
 
 The browser holds a random 256-bit token in an HTTP-only cookie; the database stores only its
 SHA-256, so a database leak doesn't leak usable sessions. Sessions are server-side and can be
-revoked (logout, password change).
+revoked (logout, password change, admin deactivation).
 """
 
 import hashlib
+import re
 import secrets
 
 from argon2 import PasswordHasher
@@ -13,11 +14,13 @@ from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatc
 
 _hasher = PasswordHasher()  # argon2id with the library's recommended parameters
 
-# Verified against when the e-mail doesn't exist, so a wrong e-mail and a wrong password take
+# Verified against when the account doesn't exist, so a wrong login and a wrong password take
 # the same time (no account enumeration through timing).
 _DUMMY_HASH = _hasher.hash(secrets.token_urlsafe(16))
 
 MIN_PASSWORD_LENGTH = 8
+USERNAME_RE = re.compile(r"^[a-zA-Z0-9._-]{3,64}$")
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def hash_password(password: str) -> str:
@@ -49,3 +52,19 @@ def password_problem(password: str) -> str | None:
     if password.strip() != password:
         return "The password can't start or end with spaces."
     return None
+
+
+def username_problem(username: str) -> str | None:
+    u = username.strip()
+    if not USERNAME_RE.match(u):
+        return "Username must be 3-64 characters using letters, numbers, '.', '_' or '-'."
+    if u[0] in "._-" or u[-1] in "._-":
+        return "Username cannot start or end with '.', '_' or '-'."
+    return None
+
+
+def normalize_email(email: str) -> str | None:
+    cleaned = email.strip().casefold()
+    if not cleaned or len(cleaned) > 320 or not EMAIL_RE.match(cleaned):
+        return None
+    return cleaned

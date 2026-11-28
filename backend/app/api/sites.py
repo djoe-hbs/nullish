@@ -1,4 +1,7 @@
-"""Site management: add / list / update / delete sites, trigger crawls, inspect pages and jobs."""
+"""Site management: add / list / update / delete sites, trigger crawls, inspect pages and jobs.
+
+Each user manages only their own websites.
+"""
 
 from datetime import datetime
 from typing import Annotated, Literal
@@ -11,15 +14,18 @@ from sqlalchemy import case, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.deps import current_user
 from app.config import get_settings
 from app.crawler.ssrf import UnsafeURLError, assert_public_url
 from app.crawler.urls import canonicalize
-from app.db.models import Chunk, CrawlJob, Page, Site
+from app.db.models import Chunk, CrawlJob, Page, Site, User
 from app.db.session import get_session
+from app.settings_store import get_system_settings
 
 router = APIRouter(prefix="/sites", tags=["sites"])
 
 DB = Annotated[AsyncSession, Depends(get_session)]
+Me = Annotated[User, Depends(current_user)]
 
 
 def get_arq(request: Request) -> ArqRedis:
@@ -133,6 +139,12 @@ class PageOut(BaseModel):
     chunks_embedded: int
 
 
+class SiteDefaultsOut(BaseModel):
+    max_pages: int
+    max_depth: int
+    crawl_delay_ms: int
+
+
 # ---- helpers -------------------------------------------------------------------------------
 
 
@@ -177,9 +189,9 @@ async def to_out(db: AsyncSession, sites: list[Site]) -> list[SiteOut]:
     return [SiteOut.model_validate(s).model_copy(update=stats[s.id]) for s in sites]
 
 
-async def get_site_or_404(db: AsyncSession, site_id: int) -> Site:
+async def get_site_or_404(db: AsyncSession, site_id: int, user_id: int) -> Site:
     site = await db.get(Site, site_id)
-    if site is None:
+    if site is None or (site.user_id is not None and site.user_id != user_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "site not found")
     return site
 
@@ -207,26 +219,45 @@ async def start_crawl(db: AsyncSession, queue: ArqRedis, site: Site) -> CrawlJob
 # ---- routes --------------------------------------------------------------------------------
 
 
+@router.get("/defaults", response_model=SiteDefaultsOut)
+async def get_site_defaults(db: DB) -> SiteDefaultsOut:
+    cfg = await get_system_settings(db, get_settings())
+    return SiteDefaultsOut(
+        max_pages=cfg.default_max_pages,
+        max_depth=cfg.default_max_depth,
+        crawl_delay_ms=cfg.default_crawl_delay_ms,
+    )
+
+
 @router.get("", response_model=list[SiteOut])
-async def list_sites(db: DB):
-    sites = list(await db.scalars(select(Site).order_by(Site.created_at)))
+async def list_sites(db: DB, me: Me):
+    sites = list(
+        await db.scalars(
+            select(Site).where(Site.user_id == me.id).order_by(Site.created_at)
+        )
+    )
     return await to_out(db, sites)
 
 
 @router.post("", response_model=SiteOut, status_code=status.HTTP_201_CREATED)
-async def create_site(body: SiteCreate, db: DB, queue: Queue):
+async def create_site(body: SiteCreate, db: DB, queue: Queue, me: Me):
     try:
         await assert_public_url(body.root_url, allow_private=get_settings().allow_private_urls)
     except UnsafeURLError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    cfg = await get_system_settings(db, get_settings())
     values = body.model_dump(exclude={"root_url", "crawl_now"}, exclude_none=True)
+    values.setdefault("max_pages", cfg.default_max_pages)
+    values.setdefault("max_depth", cfg.default_max_depth)
+    values.setdefault("crawl_delay_ms", cfg.default_crawl_delay_ms)
     host = body.root_url.split("://", 1)[1].split("/", 1)[0]
     values.setdefault("name", host.removeprefix("www."))
-    site = Site(root_url=body.root_url, **values)
+    site = Site(user_id=me.id, root_url=body.root_url, **values)
     db.add(site)
     try:
         await db.commit()
     except IntegrityError as exc:
+        await db.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, "this site is already added") from exc
     await db.refresh(site)
     if body.crawl_now:
@@ -235,13 +266,13 @@ async def create_site(body: SiteCreate, db: DB, queue: Queue):
 
 
 @router.get("/{site_id}", response_model=SiteOut)
-async def get_site(site_id: int, db: DB):
-    return (await to_out(db, [await get_site_or_404(db, site_id)]))[0]
+async def get_site(site_id: int, db: DB, me: Me):
+    return (await to_out(db, [await get_site_or_404(db, site_id, me.id)]))[0]
 
 
 @router.patch("/{site_id}", response_model=SiteOut)
-async def update_site(site_id: int, body: SiteSettings, db: DB):
-    site = await get_site_or_404(db, site_id)
+async def update_site(site_id: int, body: SiteSettings, db: DB, me: Me):
+    site = await get_site_or_404(db, site_id, me.id)
     for k, v in body.model_dump(exclude_unset=True, exclude_none=True).items():
         setattr(site, k, (v or None) if k == "site_search_url" else v)
     await db.commit()
@@ -250,20 +281,20 @@ async def update_site(site_id: int, body: SiteSettings, db: DB):
 
 
 @router.delete("/{site_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_site(site_id: int, db: DB):
-    site = await get_site_or_404(db, site_id)
+async def delete_site(site_id: int, db: DB, me: Me):
+    site = await get_site_or_404(db, site_id, me.id)
     await db.delete(site)  # pages, chunks (+ vectors) and jobs cascade
     await db.commit()
 
 
 @router.post("/{site_id}/crawl", response_model=JobOut, status_code=status.HTTP_202_ACCEPTED)
-async def crawl_site(site_id: int, db: DB, queue: Queue):
-    return await start_crawl(db, queue, await get_site_or_404(db, site_id))
+async def crawl_site(site_id: int, db: DB, queue: Queue, me: Me):
+    return await start_crawl(db, queue, await get_site_or_404(db, site_id, me.id))
 
 
 @router.get("/{site_id}/jobs", response_model=list[JobOut])
-async def list_jobs(site_id: int, db: DB, limit: int = Query(20, ge=1, le=100)):
-    await get_site_or_404(db, site_id)
+async def list_jobs(site_id: int, db: DB, me: Me, limit: int = Query(20, ge=1, le=100)):
+    await get_site_or_404(db, site_id, me.id)
     return list(await db.scalars(
         select(CrawlJob).where(CrawlJob.site_id == site_id)
         .order_by(CrawlJob.id.desc()).limit(limit)
@@ -272,11 +303,11 @@ async def list_jobs(site_id: int, db: DB, limit: int = Query(20, ge=1, le=100)):
 
 @router.get("/{site_id}/pages", response_model=list[PageOut])
 async def list_pages(
-    site_id: int, db: DB,
+    site_id: int, db: DB, me: Me,
     limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0),
     q: str | None = Query(None, max_length=200),
 ):
-    await get_site_or_404(db, site_id)
+    await get_site_or_404(db, site_id, me.id)
     chunks = (
         select(
             Chunk.page_id,

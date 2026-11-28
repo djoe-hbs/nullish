@@ -1,5 +1,6 @@
 import { Database, Globe, LibraryBig } from "lucide-react";
 import { useState } from "react";
+import type { User } from "../api/client";
 import Databases from "./Databases";
 import Sites from "./Sites";
 
@@ -7,7 +8,7 @@ type Section = "sites" | "databases";
 const KEY = "smish.sources.section";
 
 /** Everything Smish answers from: websites and databases. */
-export default function Sources() {
+export default function Sources({ user }: { user: User }) {
   const [section, setSection] = useState<Section>(() => {
     try { return localStorage.getItem(KEY) === "databases" ? "databases" : "sites"; }
     catch { return "sites"; }
@@ -33,7 +34,7 @@ export default function Sources() {
           <Database size={15} /> Databases
         </button>
       </div>
-      {section === "sites" ? <Sites /> : <Databases />}
+      {section === "sites" ? <Sites /> : <Databases user={user} />}
     </section>
   );
 }

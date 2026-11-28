@@ -25,6 +25,7 @@ RRF_K = 60
 _FILTERS = """
     s.enabled AND p.status = 'active' AND c.page_version = p.version
     AND (CAST(:site_ids AS int[]) IS NULL OR p.site_id = ANY(CAST(:site_ids AS int[])))
+    AND (CAST(:owner_id AS int) IS NULL OR s.user_id = CAST(:owner_id AS int))
 """
 
 VECTOR_SQL = text(f"""
@@ -150,11 +151,12 @@ async def retrieve(
     embedder: EmbedClient | None,
     reranker: RerankClient | None,
     site_ids: list[int] | None = None,
+    owner_id: int | None = None,
 ) -> RetrievalResult:
     t0 = time.perf_counter()
     stats: dict = {}
     k = settings.retrieval_candidates
-    params = {"site_ids": site_ids or None, "k": k}
+    params = {"site_ids": site_ids or None, "owner_id": owner_id, "k": k}
 
     vector_ids: list[int] = []
     if embedder is not None:

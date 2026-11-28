@@ -30,6 +30,11 @@ from app.llm.chat import ChatTarget
 from app.llm.embed import EmbedClient
 from app.llm.rerank import RerankClient
 from app.orchestrator.catalog import build_catalog
+from app.orchestrator.memory import (
+    ASK_RECENT_MESSAGES,
+    budgeted_history,
+    format_memory_block,
+)
 from app.orchestrator.router import route_message
 from app.retrieval.search import (
     Candidate,
@@ -56,7 +61,7 @@ Never guess.
 - Be concise: short paragraphs or bullet lists."""
 
 CITATION = re.compile(r"\[(\d{1,2})\]")
-HISTORY_MESSAGES = 6  # previous turns given to the model for follow-up context
+HISTORY_MESSAGES = ASK_RECENT_MESSAGES  # previous turns given to the model for follow-up context
 SOURCE_CHARS = 2500  # per source, keeps the prompt inside the small model's context
 
 
@@ -281,16 +286,24 @@ def source_payload(n: int, c: Candidate) -> dict:
     }
 
 
-async def sites_in_scope(db: AsyncSession, site_ids: list[int] | None) -> list[Site]:
+async def sites_in_scope(
+    db: AsyncSession, site_ids: list[int] | None, *, owner_id: int | None = None
+) -> list[Site]:
     """None = every enabled site; a list (also an empty one) = just those."""
     q = select(Site).where(Site.enabled)
+    if owner_id is not None:
+        q = q.where(Site.user_id == owner_id)
     if site_ids is not None:
         q = q.where(Site.id.in_(site_ids or [-1]))
     return list(await db.scalars(q))
 
 
-async def dbs_in_scope(db: AsyncSession, source_ids: list[int] | None) -> list[DataSource]:
+async def dbs_in_scope(
+    db: AsyncSession, source_ids: list[int] | None, *, owner_id: int | None = None
+) -> list[DataSource]:
     q = select(DataSource).where(DataSource.enabled).order_by(DataSource.id)
+    if owner_id is not None:
+        q = q.where(DataSource.user_id == owner_id)
     if source_ids is not None:
         q = q.where(DataSource.id.in_(source_ids or [-1]))
     return list(await db.scalars(q))
@@ -486,18 +499,27 @@ def done_event(start: float, out: Streamed, **extra) -> str:
     })
 
 
-def history_of(messages: list[dict], n: int = HISTORY_MESSAGES) -> list[dict]:
-    return [{"role": m["role"], "content": m["content"]} for m in messages[:-1][-n:]]
+def history_of(
+    messages: list[dict], n: int = HISTORY_MESSAGES, char_budget: int = 8_000
+) -> list[dict]:
+    return budgeted_history(messages, max_messages=n, char_budget=char_budget)
 
 
 async def chat_reply(messages: list[dict], sites: list[Site], *, chat: ChatTarget,
-                     start: float, dbs: list[DataSource] | None = None) -> AsyncIterator[str]:
+                     start: float, dbs: list[DataSource] | None = None,
+                     summary: str | None = None) -> AsyncIterator[str]:
     names = [s.name for s in sites] + [f"{d.name} (database)" for d in dbs or []]
+    mem_block = format_memory_block(summary, grounded_mode=False)
+    sys_content = CHAT_PROMPT.format(
+        sites=", ".join(names)
+        or "(none added yet: suggest adding one on the Sources page)"
+    )
+    if mem_block:
+        sys_content = f"{sys_content}\n\n{mem_block}"
     prompt = [
-        {"role": "system", "content": CHAT_PROMPT.format(
-            sites=", ".join(names)
-            or "(none added yet: suggest adding one on the Sources page)")},
-        *[{"role": m["role"], "content": m["content"]} for m in messages[-6:]],
+        {"role": "system", "content": sys_content},
+        *history_of(messages),
+        {"role": "user", "content": messages[-1]["content"]},
     ]
     out = Streamed()
     async for event in stream_completion(chat, prompt, out, start, temperature=0.6,
@@ -513,13 +535,15 @@ async def chat_reply(messages: list[dict], sites: list[Site], *, chat: ChatTarge
 async def catalog_reply(
     messages: list[dict], question: str, catalog: list[Candidate], system: str, *,
     chat: ChatTarget, start: float, intent: str, max_tokens: int | None,
-    done_extra: dict | None = None,
+    done_extra: dict | None = None, summary: str | None = None,
 ) -> AsyncIterator[str]:
     """Answers from the site catalog (overview questions, or explaining an empty search)."""
     yield sse("sources", [source_payload(n, c) for n, c in enumerate(catalog, 1)])
     yield sse("status", {"stage": "writing", "sources": len(catalog)})
+    mem_block = format_memory_block(summary, grounded_mode=True)
+    sys_content = f"{system}\n\n{mem_block}" if mem_block else system
     prompt = [
-        {"role": "system", "content": system},
+        {"role": "system", "content": sys_content},
         *history_of(messages),
         {"role": "user", "content":
             f"Catalog:\n\n{build_sources_block(catalog)}\n\nQuestion: {question}"},
@@ -553,17 +577,26 @@ async def answer_stream(
     max_tokens: int | None = None,  # None = no limit (null to vLLM)
     source_ids: list[int] | None = None,  # databases in scope; None = all enabled
     user_id: int | None = None,  # for the database audit log
+    owner_id: int | None = None,  # strictly scopes sites and databases to this user
+    system_prompt: str = SYSTEM_PROMPT,
+    conversation_summary: str | None = None,
+    local_dbs: list[tuple[DataSource, list]] | None = None,
 ) -> AsyncIterator[str]:
     start = time.perf_counter()
     question = messages[-1]["content"]
     live_stats: dict | None = None
 
     async with sessions() as db:
-        sites = await sites_in_scope(db, site_ids)
-        dbs = await dbs_in_scope(db, source_ids)
+        sites = await sites_in_scope(db, site_ids, owner_id=owner_id)
+        db_rows = await dbs_in_scope(db, source_ids, owner_id=owner_id)
+        local_list = [src for src, _ in (local_dbs or []) if src.enabled]
+        local_tables_map = {src.id: tbls for src, tbls in (local_dbs or [])}
+        dbs = [*db_rows, *local_list]
         if not sites and not dbs:
             if is_smalltalk(question):  # a fresh install still says hello back
-                async for event in chat_reply(messages, sites, chat=chat, start=start):
+                async for event in chat_reply(
+                    messages, sites, chat=chat, start=start, summary=conversation_summary
+                ):
                     yield event
                 return
             yield sse("error", {"message": "No sites or databases are set up yet. Add one on "
@@ -580,28 +613,43 @@ async def answer_stream(
             intent, query, routed = "chat", "", False
         else:
             yield sse("status", {"stage": "understanding"})
-            route = await route_message(chat, messages, sites, retrieval_query(messages), dbs)
+            route = await route_message(
+                chat, messages, sites, retrieval_query(messages), dbs, summary=conversation_summary
+            )
             intent, query, routed = route.intent, route.query, route.by == "model"
 
         if intent == "database" and dbs and route is not None:
             from app.datasources.agent import database_answer  # (imports this module)
-            from app.datasources.schema import load_schema, refresh_schema
+            from app.datasources.connectors import connect
+            from app.datasources.schema import build_tables, load_schema, refresh_schema
 
             src = pick_database(route.database, dbs, question)
-            if src.schema_refreshed_at is None:  # first question: read its structure now
-                yield sse("status", {"stage": "reading_schema", "database": src.name})
-                try:
-                    await refresh_schema(db, src, settings, embedder)
-                except Exception as exc:  # noqa: BLE001
-                    yield sse("error", {"message": f"Couldn't read {src.name}: {exc}"})
-                    return
-            tables = await load_schema(db, src)
-            db.expunge(src)
+            if src.id in local_tables_map:
+                tables = local_tables_map[src.id]
+                if not tables:
+                    yield sse("status", {"stage": "reading_schema", "database": src.name})
+                    try:
+                        async with connect(src, settings) as conn:
+                            raw = await conn.introspect()
+                            tables = build_tables(raw, conn.default_schema)
+                    except Exception as exc:  # noqa: BLE001
+                        yield sse("error", {"message": f"Couldn't read {src.name}: {exc}"})
+                        return
+            else:
+                if src.schema_refreshed_at is None:  # first question: read its structure now
+                    yield sse("status", {"stage": "reading_schema", "database": src.name})
+                    try:
+                        await refresh_schema(db, src, settings, embedder)
+                    except Exception as exc:  # noqa: BLE001
+                        yield sse("error", {"message": f"Couldn't read {src.name}: {exc}"})
+                        return
+                tables = await load_schema(db, src)
+                db.expunge(src)
             asked = query if routed and query else question
             async for event in database_answer(
                 asked, history_of(messages), src, tables, wants_change=route.change,
                 settings=settings, sessions=sessions, chat=chat, embedder=embedder,
-                user_id=user_id, max_tokens=max_tokens, start=start,
+                user_id=user_id, max_tokens=max_tokens, start=start, summary=conversation_summary,
             ):
                 yield event
             return
@@ -609,7 +657,9 @@ async def answer_stream(
             intent = "chat"
 
         if intent == "chat":
-            async for event in chat_reply(messages, sites, chat=chat, start=start, dbs=dbs):
+            async for event in chat_reply(
+                messages, sites, chat=chat, start=start, dbs=dbs, summary=conversation_summary
+            ):
                 yield event
             return
 
@@ -619,6 +669,7 @@ async def answer_stream(
                 messages, question, catalog, CATALOG_PROMPT, chat=chat, start=start,
                 intent="sites_overview", max_tokens=max_tokens,
                 done_extra={"not_found": False, "search": None, "live": None},
+                summary=conversation_summary,
             ):
                 yield event
             return
@@ -638,7 +689,7 @@ async def answer_stream(
         yield sse("status", {"stage": "searching", "sites": len(sites)})
         result = await retrieve(
             db, query, settings=settings, embedder=embedder, reranker=reranker,
-            site_ids=[s.id for s in sites],
+            site_ids=[s.id for s in sites], owner_id=owner_id,
         )
         stats = result.stats
 
@@ -657,7 +708,7 @@ async def answer_stream(
             )).all()) if pages else {}
             pages = [(pid, sid, urls[pid]) for pid, sid, _ in pages if pid in urls]
             yield sse("status", {"stage": "verifying", "pages": len(pages), "sites": len(sites)})
-            lr = await live.verify(sites, pages, query)
+            lr = await live.verify(sites, pages, query, settings=settings)
             live_stats = lr.stats
             yield sse("status", {"stage": "verified", **lr.stats})
             final = await apply_live(db, query, result.ranked, {p[0] for p in pages}, lr,
@@ -674,6 +725,7 @@ async def answer_stream(
                 messages, f"{question}\n(Searched for: {query})", catalog, NOTHING_FOUND_PROMPT,
                 chat=chat, start=start, intent="search", max_tokens=400,
                 done_extra={"not_found": True, "search": stats, "live": live_stats},
+                summary=conversation_summary,
             ):
                 yield event
             return
@@ -685,7 +737,9 @@ async def answer_stream(
     asked = question
     if not overview and query and query.strip().casefold() != question.strip().casefold():
         asked = f"{query}\n(The user's words: {question})"
-    prompt = [{"role": "system", "content": SYSTEM_PROMPT},
+    mem_block = format_memory_block(conversation_summary, grounded_mode=True)
+    eff_system = f"{system_prompt}\n\n{mem_block}" if mem_block and not overview else system_prompt
+    prompt = [{"role": "system", "content": eff_system},
               # The router already folded the conversation into a standalone question; replaying
               # the history only made the small model repeat its previous answer.
               *([] if overview or routed else history_of(messages)),

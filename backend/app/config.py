@@ -94,6 +94,21 @@ class Settings(BaseSettings):
     db_rows_to_model: int = 50  # result rows shown to the model per query
     db_change_expiry_min: int = 10  # how long an approval card stays valid
 
+    # --- Email / SMTP ---
+    # Public origin used in verification/reset links; defaults to the first frontend_origin.
+    app_base_url: str = ""
+    smtp_host: str = ""
+    smtp_port: int = 465
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from_email: str = ""
+    smtp_from_name: str = "Smish"
+    smtp_use_ssl: bool = True
+    smtp_use_starttls: bool = False
+    smtp_timeout_sec: float = 15.0
+    email_verify_token_expire_hours: int = 24
+    password_reset_token_expire_min: int = 30
+
 
 @lru_cache
 def get_settings() -> Settings:

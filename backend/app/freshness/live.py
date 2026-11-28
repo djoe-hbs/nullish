@@ -168,16 +168,18 @@ class LiveVerifier:
     # ---- verification --------------------------------------------------------------------
 
     async def verify(
-        self, sites: list[Site], pages: list[tuple[int, int, str]], query: str
+        self, sites: list[Site], pages: list[tuple[int, int, str]], query: str,
+        *, settings: Settings | None = None,
     ) -> LiveResult:
         """`pages`: (page_id, site_id, canonical_url) of the top retrieved pages, best first."""
         t0 = time.perf_counter()
+        cfg = settings or self.s
         result = LiveResult()
         by_site = {s.id: s for s in sites}
         procs = {
             s.id: PageProcessor(
-                s, self.s, self.sessions, self.fetcher, self.browser, embedder=self.embedder,
-                render_timeout_ms=int(self.s.live_render_timeout_sec * 1000),
+                s, cfg, self.sessions, self.fetcher, self.browser, embedder=self.embedder,
+                render_timeout_ms=int(cfg.live_render_timeout_sec * 1000),
             )
             for s in sites
         }
@@ -213,7 +215,7 @@ class LiveVerifier:
         sems = {sid: asyncio.Semaphore(self.s.live_per_site_concurrency) for sid in procs}
         claimed: dict[int, set[str]] = {sid: set() for sid in procs}
 
-        window = self.s.live_reverify_after_sec
+        window = cfg.live_reverify_after_sec
         now = datetime.now(UTC)
 
         async def one(sid: int, url: str, p: PrevPage | None) -> Outcome:
@@ -235,7 +237,7 @@ class LiveVerifier:
 
         tasks = {asyncio.create_task(one(sid, url, p)): (url, p, disc)
                  for sid, url, p, disc in targets}
-        done, pending = await asyncio.wait(tasks, timeout=self.s.live_total_budget_sec) \
+        done, pending = await asyncio.wait(tasks, timeout=cfg.live_total_budget_sec) \
             if tasks else (set(), set())
         for t in pending:
             t.cancel()
